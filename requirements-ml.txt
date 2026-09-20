@@ -1,0 +1,74 @@
+# MailGuard AI - machine learning and output half (x2, x4, x5, x7, fusion,
+# campaign graph, evidence ledger, forensic report).
+#
+# NOTHING IN THIS FILE IS REQUIRED TO RUN.
+#
+# Every module in this half imports and runs on the Python 3.11 standard
+# library alone. Each dependency below is guarded by a try/except ImportError
+# with a documented fallback, so installing none of them gives you a working
+# pipeline with heuristic scorers and an HTML report instead of a PDF.
+# Install with:
+#     pip install -r requirements-ml.txt
+#
+# ----------------------------------------------------------------------------
+# STRONGLY RECOMMENDED
+# ----------------------------------------------------------------------------
+# reportlab renders the forensic PDF. Without it, pdf_report.build_report()
+# writes an equivalent self-contained HTML file at the same path and returns
+# that path, so report generation never fails - but the PDF is the deliverable
+# an investigator expects.
+reportlab>=4.2,<6
+
+# ----------------------------------------------------------------------------
+# NEEDED TO LOAD ANY TRAINED MODEL
+# ----------------------------------------------------------------------------
+# Every TRAINED MODEL SLOT in this half loads its artefact with joblib. With
+# an empty slot it is never imported; the moment you fill MODEL_PATH anywhere,
+# this becomes required.
+joblib>=1.3           # optional until a model slot is filled
+
+# ----------------------------------------------------------------------------
+# FUSION (mailguard/fusion/ebm_fusion.py)
+# ----------------------------------------------------------------------------
+# interpret provides ExplainableBoostingClassifier, the fusion model proper.
+# Without it the documented weighted logistic fallback runs and the pipeline
+# still prints per-signal contributions.
+interpret>=0.6        # optional, unlocks the real EBM fusion model
+numpy>=1.26,<3        # optional, pulled in by interpret and scikit-learn
+scikit-learn>=1.4,<2  # optional, isotonic/Platt calibrator for calibrate(),
+                      # TF-IDF drift backend for x4, isolation forest for x4
+
+# ----------------------------------------------------------------------------
+# x5 INTENT - fine tuned DistilBERT classifier
+# ----------------------------------------------------------------------------
+# Both are needed together; with either missing, x5 falls back to its keyword
+# and phrase scorer. torch is a large download, hence a separate line to skip.
+transformers>=4.40    # optional, unlocks the DistilBERT intent classifier
+torch>=2.2            # optional, required by transformers and by x7's CNNs
+
+# ----------------------------------------------------------------------------
+# x4 SENDER BASELINE - embedding drift
+# ----------------------------------------------------------------------------
+# Tier 1 of three drift backends. Falls back to scikit-learn TF-IDF cosine
+# distance, then to a pure Python character n-gram Jaccard distance.
+sentence-transformers>=2.7  # optional, sharpest embedding drift backend
+
+# ----------------------------------------------------------------------------
+# x7 ATTACHMENT AND URL
+# ----------------------------------------------------------------------------
+# Pillow decodes inline images for the logo CNN and for the logo geometry
+# heuristic. Without it, image shape is inferred from file size instead.
+Pillow>=10.2          # optional, inline image decoding
+# requests is used ONLY by resolve_redirect_chain(), which is off by default.
+# See the comment on RESOLVE_REDIRECTS: fetching an attacker supplied URL is
+# an outbound action taken on the attacker's instruction.
+requests>=2.31        # optional, only if MAILGUARD_RESOLVE_REDIRECTS=1
+
+# ----------------------------------------------------------------------------
+# CAMPAIGN GRAPH (mailguard/graph/campaign_graph.py)
+# ----------------------------------------------------------------------------
+# The graph defaults to an in-memory index that always works. neo4j adds a
+# write-through mirror an analyst can query interactively; networkx adds a
+# richer in-memory view. Campaign resolution never depends on either.
+neo4j>=5.19           # optional, database backend
+networkx>=3.2         # optional, in-memory graph view
