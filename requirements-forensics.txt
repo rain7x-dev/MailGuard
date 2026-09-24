@@ -1,0 +1,40 @@
+# MailGuard AI - forensics half (ingest, parsing, trust boundary, attribution,
+# signals x1 / x3 / x6, CLI).
+#
+# EVERY PACKAGE BELOW IS OPTIONAL. The forensics half and the CLI run on the
+# Python 3.11 standard library alone. Each import is wrapped in
+# try/except ImportError, and the code falls back as documented beside it.
+#
+#     pip install -r requirements-forensics.txt
+
+# optional - x1 DKIM key length lookup; x3 MX and NS records
+dnspython>=2.4,<3
+
+# optional - x1 live SPF check against the trust boundary IP, when there is
+# no Authentication-Results header to read
+pyspf>=2.0.14,<3
+
+# optional - x1 live DKIM signature verification, same condition
+dkimpy>=1.1,<2
+
+# optional - x3 domain age and registrar when RDAP has no answer
+python-whois>=0.9,<1
+
+# optional - x3 RDAP and AbuseIPDB requests; urllib is used without it
+requests>=2.31,<3
+
+# optional - attribution: ASN, ISP and country from a MaxMind GeoLite2
+# database set in GEOLITE_DB_PATH / GEOLITE_ASN_DB_PATH. Without it the
+# attribution tier is still decided; location and ASN are reported unknown.
+geoip2>=4.7,<6
+
+# optional - x1 organisational domains for alignment; a built in two-label
+# rule with common multi-label suffixes (co.uk, co.in, ...) is used without it
+tldextract>=5.1,<6
+
+# optional - URLs hidden in inline images: QR codes (pyzbar needs the zbar
+# system library) and OCR (pytesseract needs the tesseract binary). Without
+# them the "qr" and "ocr" URL sources contribute nothing.
+Pillow>=10,<12
+pyzbar>=0.1.9,<1
+pytesseract>=0.3.10,<1

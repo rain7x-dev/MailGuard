@@ -1,0 +1,36 @@
+Received: from gw.example.org (unknown [198.51.100.77])
+	by mx.example.org (Postfix) with ESMTP id 7Q2WZ1K8XP
+	for <ap@example.org>; Mon, 21 Sep 2026 22:10:04 +0000 (UTC)
+Authentication-Results: mx.example.org;
+	spf=fail smtp.mailfrom=billing@supplier-portal.example;
+	dkim=none;
+	dmarc=fail header.from=supplier-portal.example
+Received: from mail.rt-business.example (mail.rt-business.example [192.0.2.10])
+	by gw.example.org with ESMTPS id 00AA11BB22;
+	Mon, 21 Sep 2026 22:08:30 +0000
+Received: from relay2.moscow-telecom.example (relay2.moscow-telecom.example [192.0.2.44])
+	by mail.rt-business.example with ESMTP id 5C6D7E;
+	Tue, 22 Sep 2026 01:07:51 +0300
+Received: from [192.0.2.200] (helo=office-pc)
+	by relay2.moscow-telecom.example with ESMTPSA id 1x2y3z-000AB;
+	Tue, 22 Sep 2026 01:07:40 +0300
+Return-Path: <billing@supplier-portal.example>
+From: "Supplier Billing" <billing@supplier-portal.example>
+To: ap@example.org
+Subject: Payment reminder: invoice SP-2026-0913
+Date: Tue, 22 Sep 2026 01:07:38 +0300
+Message-ID: <sp-2026-0913.77@supplier-portal.example>
+X-Mailer: Microsoft Outlook 16.0
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+Hello,
+
+This is a reminder that invoice SP-2026-0913 remains unpaid. Please arrange
+the transfer this week using the updated remittance details on our portal:
+
+https://supplier-portal.example/remittance/SP-2026-0913
+
+Best regards,
+Supplier Billing

@@ -1,0 +1,67 @@
+Received: from gw.example.org (gw.example.org [10.0.0.5])
+	by mx.example.org (Postfix) with ESMTP id 9B23EE71C4
+	for <finance@example.org>; Fri, 18 Sep 2026 09:11:20 +0530 (IST)
+Authentication-Results: mx.example.org;
+	spf=pass smtp.mailfrom=bounces@hdfc-verify.example;
+	dkim=pass header.d=hdfc-verify.example header.s=mailer01;
+	dmarc=pass header.from=hdfc-verify.example
+Received: from o19.ptr4412.sendgrid.example (o19.ptr4412.sendgrid.example [203.0.113.19])
+	by gw.example.org (Postfix) with ESMTPS id 71AD02F3E8
+	for <finance@example.org>; Fri, 18 Sep 2026 09:11:15 +0530 (IST)
+Received: from localhost (unknown [10.8.0.14])
+	by o19.ptr4412.sendgrid.example with ESMTPA id 0F44B1;
+	Fri, 18 Sep 2026 03:41:12 +0000
+DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed; d=hdfc-verify.example; s=mailer01;
+	h=from:to:subject:date:reply-to:message-id; bh=cGhpc2hib2R5aGFzaGV4YW1wbGU=;
+	b=YXR0YWNrZXItb3duZWQta2V5LXNpZ25hdHVyZS1leGFtcGxlLW9ubHk=
+Return-Path: <bounces@hdfc-verify.example>
+From: "HDFC Bank Accounts" <accounts@hdfc-verify.example>
+To: finance@example.org
+Reply-To: hdfc.recovery.desk01@freemail.example
+Subject: URGENT: overdue invoice - revised payment instructions
+Date: Fri, 18 Sep 2026 09:11:12 +0530
+Message-ID: <20260918034112.44718.9c2f@hdfc-verify.example>
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="=_alt_44718"
+
+--=_alt_44718
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+Dear Accounts Team,
+
+Invoice INV-44718 for INR 12,45,000 is now overdue. Please note that our
+bank details have changed with immediate effect: all future payments should
+be made to the new account shown on our secure portal. Kindly process the
+pending payment today itself, as our old account is frozen pending an audit
+and any delay will attract a late payment penalty.
+
+Confirm the new details and download the revised invoice here:
+https://www.hdfcbank.example/secure/invoices
+
+I am travelling and cannot take calls, so kindly keep this confidential and
+reply only to this address.
+
+Regards,
+Rakesh Menon
+Accounts Receivable, HDFC Bank
+
+--=_alt_44718
+Content-Type: text/html; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+<html><body>
+<p>Dear Accounts Team,</p>
+<p>Invoice <b>INV-44718</b> for <b>INR 12,45,000</b> is now <b>overdue</b>.
+Please note that our bank details have changed with immediate effect: all
+future payments should be made to the new account shown on our secure portal.
+Kindly process the pending payment <b>today itself</b>, as our old account is
+frozen pending an audit and any delay will attract a late payment penalty.</p>
+<p>Confirm the new details and download the revised invoice here:
+<a href="http://hdfc-verify.example/secure/login/verify?ref=44718">https://www.hdfcbank.example/secure/invoices</a></p>
+<p>I am travelling and cannot take calls, so kindly keep this confidential and
+reply only to this address.</p>
+<p>Regards,<br>Rakesh Menon<br>Accounts Receivable, HDFC Bank</p>
+</body></html>
+
+--=_alt_44718--

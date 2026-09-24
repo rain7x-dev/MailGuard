@@ -1,0 +1,57 @@
+Received: from gw.example.org (gw.example.org [10.0.0.5])
+	by mx.example.org (Postfix) with ESMTP id 4F1A2B3C9D
+	for <bob.fernandes@example.org>; Tue, 22 Sep 2026 09:12:07 +0530 (IST)
+Authentication-Results: mx.example.org;
+	spf=pass smtp.mailfrom=alice.rao@example.org;
+	dkim=pass header.d=example.org header.s=sel2026;
+	dmarc=pass header.from=example.org
+Received: from ws-114.corp.example.org (ws-114.corp.example.org [10.20.4.114])
+	by gw.example.org (Postfix) with ESMTPSA id 7D8E9F0A1B
+	for <bob.fernandes@example.org>; Tue, 22 Sep 2026 09:12:05 +0530 (IST)
+DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed; d=example.org; s=sel2026;
+	h=from:to:subject:date:message-id; bh=Zm9vYmFyYm9keWhhc2hleGFtcGxl;
+	b=c2lnbmF0dXJlLWV4YW1wbGUtb25seS1ub3QtYS1yZWFsLXNpZ25hdHVyZQ==
+From: Alice Rao <alice.rao@example.org>
+To: Bob Fernandes <bob.fernandes@example.org>
+Subject: Q3 vendor review - agenda for Thursday
+Date: Tue, 22 Sep 2026 09:12:00 +0530
+Message-ID: <20260922091200.5521.alice@example.org>
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="=_alt_5521"
+
+--=_alt_5521
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+Hi Bob,
+
+Here is the agenda for Thursday's Q3 vendor review:
+
+1. Delivery performance for July to September
+2. Renewal terms for the two logistics contracts
+3. Open questions from the audit team
+
+The shared folder with last quarter's numbers is on the intranet as usual:
+https://intranet.example.org/finance/vendor-review/q3
+
+Thanks,
+Alice
+
+--=_alt_5521
+Content-Type: text/html; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+<html><body>
+<p>Hi Bob,</p>
+<p>Here is the agenda for Thursday's Q3 vendor review:</p>
+<ol>
+<li>Delivery performance for July to September</li>
+<li>Renewal terms for the two logistics contracts</li>
+<li>Open questions from the audit team</li>
+</ol>
+<p>The shared folder with last quarter's numbers is on the intranet as usual:
+<a href="https://intranet.example.org/finance/vendor-review/q3">https://intranet.example.org/finance/vendor-review/q3</a></p>
+<p>Thanks,<br>Alice</p>
+</body></html>
+
+--=_alt_5521--
