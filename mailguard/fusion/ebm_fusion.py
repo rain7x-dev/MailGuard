@@ -106,10 +106,10 @@ FEATURE_NAMES: list[str] = [f"{sid}_score" for sid in SIGNAL_ORDER] + [
 SIGNAL_LABELS: dict[str, str] = {
     "x1": "Authentication",
     "x2": "Identity",
-    "x3": "Header and Route",
+    "x3": "Infrastructure",
     "x4": "Sender Baseline",
     "x5": "Intent",
-    "x6": "Origin and Infrastructure",
+    "x6": "Origin and Geo",
     "x7": "Attachment and URL",
 }
 
@@ -146,10 +146,10 @@ UNUSABLE_STATUSES: frozenset[str] = frozenset({"abstain", "error", "skipped", "u
 SIGNAL_WEIGHTS: dict[str, float] = {
     "x1": 0.9,   # authentication: weak, for the reason above
     "x2": 3.6,   # identity: carries BEC
-    "x3": 1.6,   # header and route anomalies
+    "x3": 1.6,   # infrastructure: domain age, MX, hosting ASN, reputation
     "x4": 1.8,   # sender baseline: the compromised-account case
     "x5": 3.2,   # intent: carries commodity phishing
-    "x6": 1.4,   # origin and infrastructure
+    "x6": 1.4,   # origin and geo: tier, anonymiser, timezone, forged hops
     "x7": 3.4,   # payload: a live macro or executable is near dispositive
 }
 
@@ -175,6 +175,14 @@ INTERACTION_WEIGHTS: dict[tuple[str, str], float] = {
     ("x4", "x5"): 0.8,
     # Hostile infrastructure carrying a hostile payload.
     ("x6", "x7"): 0.6,
+    # Direct spoofing: authentication fails for the visible From domain AND
+    # the route is forged or concealed. Each half alone has innocent
+    # explanations (a misconfigured SPF record, a VPN); together they are
+    # two independent parts of the sender's story failing at once. This is
+    # the term that lifts a DMARC-failing mail with fabricated Received
+    # hops out of PASS, while x1's own weight stays low for the reason
+    # given above: a lookalike domain authenticates perfectly.
+    ("x1", "x6"): 1.2,
 }
 
 # What an ABSENCE is worth, in log-odds points. These are the numbers the
@@ -219,11 +227,6 @@ INTERCEPT_KEY: str = "_intercept"
 PROBABILITY_FLOOR: float = 1e-6
 PROBABILITY_CEILING: float = 1.0 - 1e-6
 
-_MODEL: Any = None
-_MODEL_TRIED: bool = False
-_CALIBRATOR: Any = None
-_CALIBRATOR_TRIED: bool = False
-
 # ======================================================================
 # CALIBRATOR SLOT
 # ----------------------------------------------------------------------
@@ -234,6 +237,50 @@ _CALIBRATOR_TRIED: bool = False
 # ======================================================================
 CALIBRATOR_PATH: str = ""     # <-- trained calibrator path goes here
 
+# ======================================================================
+# COLD START SLOT: a separate model and calibrator for first contact
+# ----------------------------------------------------------------------
+# A first-time sender has no history, so x4 cannot run. The standard
+# model handles that through x4's is_present column, but a model trained
+# mostly on known correspondents learns the absence from few examples.
+# First contact gets its own model, fitted only on first-contact mail
+# over the signals that do not need sender history, and its own
+# calibrator, because the base rate of fraud among strangers is not the
+# base rate among known correspondents.
+#
+# Expected artefacts: as for MODEL_PATH and CALIBRATOR_PATH, but with
+# 2 * len(COLD_START_SIGNALS) columns in COLD_START_FEATURE_NAMES order.
+# Empty slots fall back to the standard model and calibrator, so until
+# they are trained a gap is still scored through x4's missingness prior,
+# never as zero.
+# ======================================================================
+COLD_START_MODEL_PATH: str = ""        # <-- first-contact model path goes here
+COLD_START_CALIBRATOR_PATH: str = ""   # <-- first-contact calibrator path goes here
+COLD_START_SIGNALS: list[str] = [sid for sid in SIGNAL_ORDER if sid != "x4"]
+COLD_START_FEATURE_NAMES: list[str] = [f"{sid}_score" for sid in COLD_START_SIGNALS] + [
+    f"{sid}_is_present" for sid in COLD_START_SIGNALS
+]
+
+# path -> loaded artefact (None when missing or unloadable), loaded once.
+_ARTEFACTS: dict[str, Any] = {}
+
+
+def _load_artefact(path: str) -> Any:
+    """Load a joblib artefact once, or return None for an empty or broken slot."""
+    if not path:
+        return None
+    if path not in _ARTEFACTS:
+        artefact = None
+        if os.path.exists(path) and HAS_JOBLIB:
+            try:
+                import joblib
+
+                artefact = joblib.load(path)
+            except Exception:
+                artefact = None
+        _ARTEFACTS[path] = artefact
+    return _ARTEFACTS[path]
+
 
 def _sigmoid(value: float) -> float:
     """Numerically safe logistic function."""
@@ -243,7 +290,7 @@ def _sigmoid(value: float) -> float:
     return exponential / (1.0 + exponential)
 
 
-def calibrate(raw_score: float) -> float:
+def calibrate(raw_score: float, cold_start: bool = False) -> float:
     """Map a raw model score to a probability that means what it says.
 
     Calibration is what makes 0.9 mean roughly nine in ten. Without it,
@@ -256,25 +303,19 @@ def calibrate(raw_score: float) -> float:
     score would make the whole policy meaningless.
 
     Defaults to the identity function, so the untrained pipeline is
-    honest about doing no calibration rather than pretending to.
+    honest about doing no calibration rather than pretending to. With
+    cold_start set, the first-contact calibrator is used when one exists.
     """
-    global _CALIBRATOR, _CALIBRATOR_TRIED
     value = max(0.0, min(1.0, float(raw_score)))
-    if not _CALIBRATOR_TRIED:
-        _CALIBRATOR_TRIED = True
-        if CALIBRATOR_PATH and os.path.exists(CALIBRATOR_PATH) and HAS_JOBLIB:
-            try:
-                import joblib
-
-                _CALIBRATOR = joblib.load(CALIBRATOR_PATH)
-            except Exception:
-                _CALIBRATOR = None
-    if _CALIBRATOR is None:
+    calibrator = (_load_artefact(COLD_START_CALIBRATOR_PATH) if cold_start else None) or _load_artefact(
+        CALIBRATOR_PATH
+    )
+    if calibrator is None:
         return value
     try:
-        if hasattr(_CALIBRATOR, "predict_proba"):
-            return max(0.0, min(1.0, float(_CALIBRATOR.predict_proba([[value]])[0][1])))
-        return max(0.0, min(1.0, float(_CALIBRATOR.predict([value])[0])))
+        if hasattr(calibrator, "predict_proba"):
+            return max(0.0, min(1.0, float(calibrator.predict_proba([[value]])[0][1])))
+        return max(0.0, min(1.0, float(calibrator.predict([value])[0])))
     except Exception:
         return value
 
@@ -380,21 +421,24 @@ def _heuristic_logit(vector: list[float]) -> tuple[float, dict[str, float]]:
 # ----------------------------------------------------------------------
 def _load_model() -> Any:
     """Load the trained EBM once, or return None if the slot is empty."""
-    global _MODEL, _MODEL_TRIED
-    if _MODEL_TRIED:
-        return _MODEL
-    _MODEL_TRIED = True
-    if not MODEL_PATH or not os.path.exists(MODEL_PATH):
-        return None
-    if not HAS_JOBLIB:
-        return None
-    try:
-        import joblib
+    return _load_artefact(MODEL_PATH)
 
-        _MODEL = joblib.load(MODEL_PATH)
-    except Exception:
-        _MODEL = None
-    return _MODEL
+
+def is_cold_start(by_id: dict[str, Optional[SignalResult]]) -> bool:
+    """First contact: the sender baseline could not run, so there is no history."""
+    return not is_usable(by_id.get("x4"))
+
+
+def cold_start_vector(by_id: dict[str, Optional[SignalResult]]) -> list[float]:
+    """The feature vector for the cold start model, in COLD_START_FEATURE_NAMES order."""
+    scores: list[float] = []
+    presence: list[float] = []
+    for sid in COLD_START_SIGNALS:
+        signal = by_id.get(sid)
+        usable = is_usable(signal)
+        scores.append(max(0.0, min(1.0, float(signal.score))) if usable and signal is not None else 0.0)
+        presence.append(1.0 if usable else 0.0)
+    return scores + presence
 
 
 def _term_to_key(term_name: str) -> Optional[str]:
@@ -421,6 +465,7 @@ def _term_to_key(term_name: str) -> Optional[str]:
 
 def _model_score_and_contributions(
     vector: list[float],
+    model: Any = None,
 ) -> Optional[tuple[float, dict[str, float]]]:
     """Score with the trained EBM, with real per-term attributions.
 
@@ -434,7 +479,7 @@ def _model_score_and_contributions(
     with the heuristic's attribution would print an evidence table whose
     numbers do not add up to the verdict above it.
     """
-    model = _load_model()
+    model = model if model is not None else _load_model()
     if model is None:
         return None
     try:
@@ -495,16 +540,29 @@ def fuse(signals: list[SignalResult], email: ParsedEmail) -> Verdict:
     and the evidence ledger fill them in, because neither is a property
     of the fusion arithmetic.
     """
-    vector, _by_id = build_feature_vector(signals)
+    vector, by_id = build_feature_vector(signals)
+    cold = is_cold_start(by_id)
 
-    model_result = _model_score_and_contributions(vector)
+    model_result = None
+    variant = "standard"
+    cold_model = _load_artefact(COLD_START_MODEL_PATH) if cold else None
+    if cold_model is not None:
+        model_result = _model_score_and_contributions(cold_start_vector(by_id), cold_model)
+        variant = "cold_start" if model_result is not None else variant
+    if model_result is None:
+        model_result = _model_score_and_contributions(vector)
     if model_result is not None:
         raw_probability, contributions = model_result
+        scorer = "ebm"
     else:
         logit, contributions = _heuristic_logit(vector)
         raw_probability = _sigmoid(logit)
+        scorer = "heuristic"
 
-    probability = min(max(calibrate(raw_probability), PROBABILITY_FLOOR), PROBABILITY_CEILING)
+    probability = min(max(calibrate(raw_probability, cold_start=cold), PROBABILITY_FLOOR), PROBABILITY_CEILING)
+    if email is not None:
+        # Which model actually produced this verdict, for the report.
+        email.meta["fusion"] = {"variant": variant, "scorer": scorer, "first_contact": cold}
     signal_list = list(signals or [])
     return Verdict(
         probability=round(float(probability), 6),
@@ -545,6 +603,8 @@ def model_status() -> dict[str, Any]:
         "fusion_model": "ExplainableBoostingClassifier" if _load_model() is not None else "heuristic weighted logistic",
         "model_path": MODEL_PATH or "(empty slot)",
         "calibrator": "fitted" if (CALIBRATOR_PATH and os.path.exists(CALIBRATOR_PATH)) else "identity (none fitted)",
+        "cold_start_model": "fitted" if _load_artefact(COLD_START_MODEL_PATH) is not None else "(empty slot)",
+        "cold_start_signals": list(COLD_START_SIGNALS),
         "interpret_available": HAS_INTERPRET,
         "signal_order": list(SIGNAL_ORDER),
         "intercept": INTERCEPT,

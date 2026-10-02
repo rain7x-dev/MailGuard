@@ -52,8 +52,9 @@ thorough signal in this half for that reason.
 | Reply-To divergence | Reply-To differing from From, scored higher when it lands at free mail. |
 | First contact | Whether this address has written to this recipient before, read from a JSON history store (a database table in production). |
 | Thread hijack | `In-Reply-To` referencing a Message-ID this installation has never seen. Forging a reply to a conversation that never happened costs an attacker nothing; a real thread hijack requires mailbox access. |
+| Executive impersonation | The display name is one of this organisation's executives (`MAILGUARD_EXECUTIVES`) but the address is outside its domains (`MAILGUARD_ORG_DOMAINS`). Off while either is unset. |
 
-Fifteen features, listed in `FEATURE_NAMES`. Being the genuine protected domain
+Sixteen features, listed in `FEATURE_NAMES`. Being the genuine protected domain
 subtracts from the score, the only negative term in the signal.
 
 ### x4 Sender Baseline - the only signal that catches a compromised account
@@ -97,10 +98,17 @@ sentence is the payload of nearly every successful BEC.
   host confirms delivery, leaks the timing of analysis, exposes the scanner's
   address, and in a targeted case is an attack surface aimed at the scanner.
   An operator turns it on knowingly, ideally through an egress proxy.
-- **Attachment risk**: macro bearing Office documents detected two ways, the
-  OLE2 magic `\xd0\xcf\x11\xe0` for legacy binary formats and the presence of
-  `vbaProject.bin` inside the OOXML zip; MIME type against actual magic bytes;
-  double extensions; right-to-left override filenames; executables; archives.
+- **Attachment risk**: macro bearing Office documents detected two ways, a
+  VBA project inside a legacy OLE2 file (oletools when installed, else the
+  `_VBA_PROJECT` directory entry; the OLE2 magic alone is every old `.doc`
+  and proves nothing) and `vbaProject.bin` inside the OOXML zip; MIME type
+  against actual magic bytes (an OOXML zip is a valid `.docx`, not a
+  mismatch); double extensions; right-to-left override filenames;
+  executables, including `.lnk` shortcuts by magic; archives.
+- **Threat intelligence**: every link is checked against a local PhishTank
+  dump (`MAILGUARD_PHISHTANK_PATH`, CSV, JSON or one URL per line). An exact
+  URL hit is near dispositive; a host-only hit is weaker and is never taken
+  on shared hosting.
 
 ---
 
@@ -244,7 +252,8 @@ pipeline works end to end today.
 | x5 Intent | `signals/x5_intent.py` | `MODEL_PATH` | **directory** from `save_pretrained()`: fine tuned DistilBERT sequence classifier, loadable by `AutoTokenizer` / `AutoModelForSequenceClassification`; fraud label named in `config.id2label` | subject and body joined by a newline, truncated to `MAX_TOKENS` (512) | Weighted phrase family scorer: bank detail change 0.42, credential harvest 0.36, payment redirection 0.30, login CTA 0.22, invoice 0.18, pressure families 0.10-0.14, plus an action-times-urgency interaction of 0.15 |
 | x7 URL | `signals/x7_attachment_url.py` | `MODEL_PATH` | joblib dumped dict `{"model": torch module or sklearn scorer, "vocab": {...}, "max_len": 200, "framework": "torch"\|"sklearn"}` | the URL **string**, encoded by `encode_url()` into a fixed length integer sequence; index 0 is padding and out of vocabulary | Enumerated structural risk per URL (punycode 0.45, IP host 0.40, `@` 0.35, anchor mismatch 0.30, leet 0.20, bad TLD 0.20, ...), worst URL wins |
 | x7 Logo | `signals/x7_attachment_url.py` | `LOGO_MODEL_PATH`, `LOGO_LABEL_MAP_PATH`, `LOGO_ARCH_FACTORY` | torch `state_dict` for a classifier over 64x64 RGB crops, plus a JSON label map `{"0": "none", "1": "hdfc", ...}` | each inline image decoded to RGB and resized to 64x64 | Setting-only heuristic: brand named in the text + logo shaped inline image + sending domain not entitled to that brand = 0.55, capped low because a scorer that has not looked at the image cannot honestly claim more |
-| Fusion | `fusion/ebm_fusion.py` | `MODEL_PATH` | joblib dumped `interpret.glassbox.ExplainableBoostingClassifier`, interactions enabled, **must** support `explain_local()` | 14 columns in `FEATURE_NAMES` order: 7 scores then 7 `is_present` flags | Weighted logistic combination: `SIGNAL_WEIGHTS` (x2 3.6, x5 3.2, x7 3.4, x4 1.8, x3 1.6, x6 1.4, x1 0.9), `INTERACTION_WEIGHTS` (x2*x5 2.2, x2*x7 0.9, x4*x5 0.8, x6*x7 0.6), `MISSING_WEIGHTS` per signal, intercept -4.2 |
+| Fusion | `fusion/ebm_fusion.py` | `MODEL_PATH` | joblib dumped `interpret.glassbox.ExplainableBoostingClassifier`, interactions enabled, **must** support `explain_local()` | 14 columns in `FEATURE_NAMES` order: 7 scores then 7 `is_present` flags | Weighted logistic combination: `SIGNAL_WEIGHTS` (x2 3.6, x5 3.2, x7 3.4, x4 1.8, x3 1.6, x6 1.4, x1 0.9), `INTERACTION_WEIGHTS` (x2*x5 2.2, x1*x6 1.2, x2*x7 0.9, x4*x5 0.8, x6*x7 0.6), `MISSING_WEIGHTS` per signal, intercept -4.2 |
+| Cold start | `fusion/ebm_fusion.py` | `COLD_START_MODEL_PATH`, `COLD_START_CALIBRATOR_PATH` | as for Fusion and Calibration, fitted on first-contact mail only | `2 * len(COLD_START_SIGNALS)` columns in `COLD_START_FEATURE_NAMES` order; used when x4 cannot run | the standard model, with x4's missingness prior |
 | Calibration | `fusion/ebm_fusion.py` | `CALIBRATOR_PATH` | joblib dumped isotonic regression or Platt scaler with `predict()` or `predict_proba()`, fitted on held out mail | the raw fused score | identity function (no calibration, and the report says so) |
 
 Notes for whoever trains these:
@@ -285,7 +294,11 @@ hosting provider shares an ASN.
 
 Shared weight is summed and a link forms at `LINK_THRESHOLD = 0.6`. One high
 specificity artefact links; an ASN alone does not. Shared-provider values
-(`gmail.com`, `bit.ly`, `sharepoint.com`, ...) are recorded but never link.
+(`gmail.com`, `bit.ly`, `sharepoint.com`, ...) are recorded but never link,
+and neither do default DKIM selectors (`selector1` on every Microsoft 365
+tenant, `google`, `default`, ...): a selector is a fingerprint only when
+someone chose it. The CLI files WARN and BLOCK verdicts only, and
+`prune(retention_days)` drops cases older than `MAILGUARD_RETENTION_DAYS`.
 
 Two backends behind one interface: an in-memory index (the default, always
 works, and the source of truth for resolution) and Neo4j as a write-through
@@ -383,6 +396,8 @@ fixture and never raise on garbage.
 | `MAILGUARD_MIN_BASELINE` | `5` | Prior messages x4 needs before it stops abstaining |
 | `MAILGUARD_EMBEDDING_MODEL` | `sentence-transformers/all-MiniLM-L6-v2` | Embedding model for x4 drift |
 | `MAILGUARD_RESOLVE_REDIRECTS` | unset | Set to `1` to let x7 follow shortened links |
+| `MAILGUARD_PHISHTANK_PATH` | unset | Local PhishTank dump x7 checks every link against |
+| `MAILGUARD_EXECUTIVES` / `MAILGUARD_ORG_DOMAINS` | unset | Executive names and own domains for x2's executive impersonation check |
 | `MAILGUARD_GRAPH_PATH` | unset | JSON persistence for the campaign graph |
 | `MAILGUARD_NEO4J_URI` / `_USER` / `_PASSWORD` | unset | Neo4j mirror for the campaign graph |
 | `MAILGUARD_LEDGER_PATH` | `mailguard_ledger.jsonl` | Default evidence ledger file |

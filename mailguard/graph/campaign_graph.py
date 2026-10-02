@@ -90,6 +90,30 @@ LOW_SPECIFICITY_VALUES: frozenset[str] = frozenset({
     "drive.google.com", "sharepoint.com", "onedrive.live.com",
 })
 
+# DKIM selectors that are provider or software defaults. A selector is an
+# operator fingerprint only when someone chose it: every Microsoft 365
+# tenant signs with selector1 / selector2, every Google Workspace domain
+# with "google", and countless servers with "default" or "mail". Linking
+# on these at 0.8 would merge thousands of unrelated senders.
+COMMON_DKIM_SELECTORS: frozenset[str] = frozenset({
+    "selector1", "selector2", "google", "default", "dkim", "mail", "k1", "k2",
+    "s1", "s2", "s1024", "s2048", "smtp", "key1", "key2", "mx", "everlytickey1",
+    "everlytickey2", "mandrill", "mte1", "pm", "scph0220", "zoho", "sig1", "fm1",
+    "fm2", "fm3", "protonmail", "protonmail2", "protonmail3", "amazonses",
+})
+
+
+def _is_linkable(kind: str, value: str) -> bool:
+    """May this artefact join two messages into one campaign?"""
+    if LINK_SPECIFICITY.get(kind, 0.0) <= 0.0:
+        return False
+    lowered = value.lower()
+    if lowered in LOW_SPECIFICITY_VALUES:
+        return False
+    if kind == "dkim_selector" and lowered in COMMON_DKIM_SELECTORS:
+        return False
+    return True
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -182,14 +206,7 @@ def extract_artefacts(
 
 def linkable_artefacts(artefacts: Iterable[tuple[str, str]]) -> list[tuple[str, str]]:
     """Artefacts allowed to join campaigns, dropping the worthless ones."""
-    result: list[tuple[str, str]] = []
-    for kind, value in artefacts:
-        if LINK_SPECIFICITY.get(kind, 0.0) <= 0.0:
-            continue
-        if value.lower() in LOW_SPECIFICITY_VALUES:
-            continue
-        result.append((kind, value))
-    return result
+    return [(kind, value) for kind, value in artefacts if _is_linkable(kind, value)]
 
 
 class _Neo4jBackend:
@@ -429,7 +446,7 @@ class CampaignGraph:
             key = _artefact_key(kind, value)
             campaign["artefacts"].add(key)
             self._artefact_messages.setdefault(key, set()).add(message_id)
-            if LINK_SPECIFICITY.get(kind, 0.0) > 0.0 and value.lower() not in LOW_SPECIFICITY_VALUES:
+            if _is_linkable(kind, value):
                 self._artefact_campaign.setdefault(key, set()).add(campaign_id)
             if self._nx_graph is not None:
                 self._nx_graph.add_node(key, kind=kind, value=value, node_type="artefact")
@@ -514,6 +531,49 @@ class CampaignGraph:
             "networkx": HAS_NETWORKX,
             "neo4j_driver": HAS_NEO4J,
         }
+
+    def prune(self, retention_days: int, now: Optional[datetime] = None) -> int:
+        """Forget messages first seen more than retention_days ago. Returns how many.
+
+        Retention applies to the stored case data, not to the evidence
+        ledger, which is append only and holds hashes rather than content.
+        Campaigns left with no messages are removed; artefacts no remaining
+        message carries stop linking anything. 0 or less keeps everything.
+        """
+        if retention_days <= 0:
+            return 0
+        cutoff = (now or datetime.now(timezone.utc)).timestamp() - retention_days * 86400.0
+        expired: set[str] = set()
+        for message_id, record in self._messages.items():
+            try:
+                seen = datetime.fromisoformat(str(record.get("seen_at")))
+                if seen.tzinfo is None:
+                    seen = seen.replace(tzinfo=timezone.utc)
+                if seen.timestamp() < cutoff:
+                    expired.add(message_id)
+            except (TypeError, ValueError):
+                continue
+        if not expired:
+            return 0
+        for message_id in expired:
+            self._messages.pop(message_id, None)
+        for key in list(self._artefact_messages):
+            self._artefact_messages[key] -= expired
+            if not self._artefact_messages[key]:
+                del self._artefact_messages[key]
+                self._artefact_campaign.pop(key, None)
+        for campaign_id in list(self._campaigns):
+            campaign = self._campaigns[campaign_id]
+            campaign["messages"] = [m for m in campaign["messages"] if m not in expired]
+            if not campaign["messages"]:
+                del self._campaigns[campaign_id]
+                for campaign_ids in self._artefact_campaign.values():
+                    campaign_ids.discard(campaign_id)
+        if self._nx_graph is not None:
+            self._nx_graph.remove_nodes_from(expired)
+        if self.store_path:
+            self.save()
+        return len(expired)
 
     # ------------------------------------------------------------------
     # Optional persistence. Production uses the database; this keeps a

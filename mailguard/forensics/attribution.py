@@ -26,6 +26,10 @@ layer, and the effort taken to hide the origin is evidence about intent.
 IP facts come from MaxMind GeoLite2 through the optional `geoip2` library
 when GEOLITE_DB_PATH (and optionally GEOLITE_ASN_DB_PATH) is configured.
 Without them classify_ip() returns a stub with no location and says so.
+A City database also yields region, city and coordinates; coordinates are
+kept only for tier 1, so the trace map can never pin a provider or an
+anonymiser as the sender. Tor exits are recognised from a local copy of
+the Tor Project exit list (TOR_EXIT_LIST_PATH) as well as by keyword.
 No network call is ever made by default.
 """
 from __future__ import annotations
@@ -46,6 +50,28 @@ except ImportError:
     HAS_GEOIP2 = False
 
 TIER_NAMES: dict[int, str] = {1: "direct_ip", 2: "provider_bounded", 3: "anonymised"}
+
+# path -> (mtime, set of exit IPs), so a batch run reads the list once.
+_TOR_CACHE: dict[str, tuple[float, frozenset[str]]] = {}
+
+
+def tor_exits(path: str) -> frozenset[str]:
+    """Exit IPs from a local Tor exit list (one per line, # comments). Empty when unset."""
+    if not path or not os.path.exists(path):
+        return frozenset()
+    try:
+        mtime = os.path.getmtime(path)
+        cached = _TOR_CACHE.get(path)
+        if cached and cached[0] == mtime:
+            return cached[1]
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            ips = frozenset(
+                line.split()[0].strip() for line in fh if line.strip() and not line.lstrip().startswith("#")
+            )
+        _TOR_CACHE[path] = (mtime, ips)
+        return ips
+    except OSError:
+        return frozenset()
 
 
 def _matches(text: Optional[str], keywords: list[str]) -> Optional[str]:
@@ -73,13 +99,15 @@ def _provider_for(host: Optional[str], providers: dict[str, str]) -> Optional[st
 def classify_ip(ip: str, config: Optional[Config] = None) -> dict[str, Any]:
     """ASN, country, ISP and network type for one IP address. Never raises.
 
-    Returns keys: ip, asn, country, isp, is_datacentre, is_vpn_or_tor,
-    internal, lookup_unavailable, source.
+    Returns keys: ip, asn, country, region, city, latitude, longitude, isp,
+    is_datacentre, is_vpn_or_tor, is_tor_exit, internal,
+    lookup_unavailable, source.
     """
     config = config or get_config()
     info: dict[str, Any] = {
-        "ip": ip, "asn": None, "country": None, "isp": None,
-        "is_datacentre": False, "is_vpn_or_tor": False,
+        "ip": ip, "asn": None, "country": None, "region": None, "city": None,
+        "latitude": None, "longitude": None, "isp": None,
+        "is_datacentre": False, "is_vpn_or_tor": False, "is_tor_exit": False,
         "internal": is_internal_ip(ip), "lookup_unavailable": True, "source": None,
     }
     if not ip or info["internal"]:
@@ -99,6 +127,17 @@ def classify_ip(ip: str, config: Optional[Config] = None) -> dict[str, Any]:
                         info["country"] = record.country.iso_code
                         info["lookup_unavailable"] = False
                         info["source"] = "geolite2"
+                    # City-level fields exist only on a City database record.
+                    subdivisions = getattr(record, "subdivisions", None)
+                    if subdivisions and subdivisions.most_specific.name:
+                        info["region"] = subdivisions.most_specific.name
+                    city = getattr(record, "city", None)
+                    if city is not None and city.name:
+                        info["city"] = city.name
+                    location = getattr(record, "location", None)
+                    if location is not None and location.latitude is not None:
+                        info["latitude"] = float(location.latitude)
+                        info["longitude"] = float(location.longitude)
             except Exception:
                 pass
         if asn_path and os.path.exists(asn_path):
@@ -114,7 +153,8 @@ def classify_ip(ip: str, config: Optional[Config] = None) -> dict[str, Any]:
                 pass
 
     info["is_datacentre"] = bool(_matches(info["isp"], config.datacentre_asn_keywords))
-    info["is_vpn_or_tor"] = bool(_matches(info["isp"], config.vpn_tor_keywords))
+    info["is_tor_exit"] = ip in tor_exits(config.tor_exit_list_path)
+    info["is_vpn_or_tor"] = info["is_tor_exit"] or bool(_matches(info["isp"], config.vpn_tor_keywords))
     return info
 
 
@@ -170,6 +210,8 @@ def attribute(email: ParsedEmail, config: Optional[Config] = None) -> Attributio
             "boundary_ip": ip,
             "asn": info["asn"],
             "country": info["country"],
+            "region": info["region"],
+            "city": info["city"],
             "isp": info["isp"],
         }
         lookup_note = "; IP intelligence unavailable (no GeoLite2 database)" if info["lookup_unavailable"] else ""
@@ -178,7 +220,7 @@ def attribute(email: ParsedEmail, config: Optional[Config] = None) -> Attributio
             # No reverse DNS: name the claimed HELO, but never match on it.
             lookup_note = f"; no reverse DNS, the host called itself '{helo}' (unverified)" + lookup_note
 
-        anonymiser = _matches(host, config.vpn_tor_keywords) or (
+        anonymiser = ("Tor exit list" if info["is_tor_exit"] else None) or _matches(host, config.vpn_tor_keywords) or (
             _matches(info["isp"], config.vpn_tor_keywords) if info["isp"] else None
         )
         if anonymiser or info["is_vpn_or_tor"]:
@@ -208,6 +250,9 @@ def attribute(email: ParsedEmail, config: Optional[Config] = None) -> Attributio
                 **common,
             )
 
+        # Coordinates only at tier 1. At tier 2 and 3 a point on a map would
+        # be the provider's or the anonymiser's location presented as the
+        # sender's, which is the false pin the trace map must never draw.
         return Attribution(
             tier=1,
             tier_name=TIER_NAMES[1],
@@ -215,6 +260,8 @@ def attribute(email: ParsedEmail, config: Optional[Config] = None) -> Attributio
                 f"boundary {ip} ({host or 'no reverse DNS'}) connected directly to our server and is not a "
                 f"known provider, hosting network or anonymiser{lookup_note}{_claims_below(email)}"
             ),
+            latitude=info["latitude"],
+            longitude=info["longitude"],
             **common,
         )
     except Exception as exc:

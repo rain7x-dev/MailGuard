@@ -9,11 +9,15 @@ its href, link domains unrelated to the sending domain, raw IP hosts,
 credential-flavoured paths, and the small print of a URL that a reader
 never sees (userinfo before an @, a non standard port, absurd length).
 
-Attachment risk. Macro bearing Office documents, detected two ways: the
-OLE2 magic \\xd0\\xcf\\x11\\xe0 for the legacy binary formats, and the
-presence of vbaProject.bin inside the zip for OOXML. Plus MIME type
-against actual magic bytes, double extensions, right-to-left override
-tricks, executables and archives.
+Attachment risk. Macro bearing Office documents, detected two ways: a VBA
+project inside a legacy OLE2 file (oletools when installed, else the
+_VBA_PROJECT directory entry; the OLE2 magic alone is every old .doc and
+proves nothing), and vbaProject.bin inside the zip for OOXML. Plus MIME
+type against actual magic bytes, double extensions, right-to-left
+override tricks, executables and archives.
+
+Threat intelligence. Every link is checked against a local PhishTank
+dump when MAILGUARD_PHISHTANK_PATH points at one.
 
 Redirect resolution is available and OFF by default. See
 RESOLVE_REDIRECTS below for why: fetching an attacker supplied URL from
@@ -69,6 +73,13 @@ try:
 except ImportError:
     HAS_PILLOW = False
 
+try:
+    from oletools.olevba import VBA_Parser
+
+    HAS_OLETOOLS = True
+except ImportError:
+    HAS_OLETOOLS = False
+
 # ======================================================================
 # TRAINED MODEL SLOT 1 of 2: URL character level CNN
 # ----------------------------------------------------------------------
@@ -116,6 +127,7 @@ FEATURE_NAMES: list[str] = [
     "suspicious_tld",                  # .zip, .top, .xyz and friends
     "url_length_norm",                 # longest URL, normalised
     "redirect_chain_length_norm",      # only populated if resolution is on
+    "known_phish_url",                 # 1.0 exact URL in the PhishTank feed, 0.6 host only
     # Attachment risk
     "attachment_count_norm",
     "macro_office_document",           # OLE2 magic or vbaProject.bin
@@ -179,6 +191,22 @@ LOGO_FEATURE_NAMES: list[str] = [
 RESOLVE_REDIRECTS: bool = os.environ.get("MAILGUARD_RESOLVE_REDIRECTS", "") == "1"
 REDIRECT_TIMEOUT: float = 3.0
 REDIRECT_MAX_HOPS: int = 5
+
+# ----------------------------------------------------------------------
+# Threat intelligence: a local PhishTank feed.
+# ----------------------------------------------------------------------
+# A downloaded PhishTank dump (online-valid.csv or online-valid.json), or
+# a plain text file with one URL per line. Read from disk only, so the
+# check costs no network call and works on stored evidence. An exact URL
+# hit is close to dispositive; a host-only hit is weaker, and is never
+# taken on shared hosting where one bad page says nothing about the rest.
+PHISHTANK_PATH: str = os.environ.get("MAILGUARD_PHISHTANK_PATH", "")
+SHARED_HOSTING_DOMAINS: frozenset[str] = frozenset({
+    "google.com", "microsoft.com", "sharepoint.com", "live.com", "dropbox.com",
+    "github.io", "blogspot.com", "wixsite.com", "weebly.com", "firebaseapp.com",
+    "web.app", "azurewebsites.net", "amazonaws.com", "cloudfront.net", "netlify.app",
+    "vercel.app", "pages.dev", "workers.dev", "glitch.me", "herokuapp.com",
+})
 
 # ----------------------------------------------------------------------
 # Reference data
@@ -252,13 +280,13 @@ MIME_TO_MAGIC: dict[str, frozenset[str]] = {
     "application/zip": frozenset({"zip"}),
     "application/x-rar-compressed": frozenset({"rar"}),
     "application/msword": frozenset({"ole2", "rtf"}),
-    "application/vnd.ms-excel": frozenset({"ole2", "zip"}),
+    "application/vnd.ms-excel": frozenset({"ole2", "zip", "ooxml"}),
     "application/vnd.ms-powerpoint": frozenset({"ole2"}),
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": frozenset({"zip"}),
-    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": frozenset({"zip"}),
-    "application/vnd.openxmlformats-officedocument.presentationml.presentation": frozenset({"zip"}),
-    "application/vnd.ms-excel.sheet.macroenabled.12": frozenset({"zip"}),
-    "application/vnd.ms-word.document.macroenabled.12": frozenset({"zip"}),
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": frozenset({"zip", "ooxml"}),
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": frozenset({"zip", "ooxml"}),
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation": frozenset({"zip", "ooxml"}),
+    "application/vnd.ms-excel.sheet.macroenabled.12": frozenset({"zip", "ooxml"}),
+    "application/vnd.ms-word.document.macroenabled.12": frozenset({"zip", "ooxml"}),
     "text/plain": frozenset({"", "text"}),
     "application/rtf": frozenset({"rtf", "ole2"}),
 }
@@ -290,6 +318,7 @@ _DOMAIN_IN_TEXT = re.compile(r"\b(?:[a-z0-9][a-z0-9-]{0,62}\.)+[a-z]{2,24}\b", r
 
 _MODEL: Any = None
 _MODEL_TRIED: bool = False
+_PHISH_CACHE: dict[str, tuple[float, frozenset[str], frozenset[str]]] = {}
 _LOGO_MODEL: Any = None
 _LOGO_LABELS: Optional[dict[str, str]] = None
 _LOGO_TRIED: bool = False
@@ -408,6 +437,61 @@ def resolve_redirect_chain(url: str) -> list[str]:
         return []
 
 
+def _normalise_feed_url(url: str) -> str:
+    return (url or "").strip().lower().rstrip("/")
+
+
+def load_phish_feed(path: Optional[str] = None) -> tuple[frozenset[str], frozenset[str]]:
+    """(listed URLs, listed hosts) from a local PhishTank dump. Empty when unset.
+
+    Accepts PhishTank's CSV (a `url` column) and JSON (objects with a
+    `url` key), or plain text with one URL per line. Cached on mtime.
+    """
+    target = PHISHTANK_PATH if path is None else path
+    if not target or not os.path.exists(target):
+        return frozenset(), frozenset()
+    try:
+        mtime = os.path.getmtime(target)
+        cached = _PHISH_CACHE.get(target)
+        if cached and cached[0] == mtime:
+            return cached[1], cached[2]
+        with open(target, "r", encoding="utf-8", errors="replace") as fh:
+            text = fh.read()
+        raw_urls: list[str] = []
+        stripped = text.lstrip()
+        if stripped.startswith("["):
+            raw_urls = [str(item.get("url", "")) for item in json.loads(text) if isinstance(item, dict)]
+        else:
+            import csv
+
+            lines = text.splitlines()
+            header = [cell.strip().lower() for cell in next(csv.reader(lines[:1]), [])]
+            if "url" in header:
+                column = header.index("url")
+                raw_urls = [row[column] for row in csv.reader(lines[1:]) if len(row) > column]
+            else:
+                raw_urls = [line.strip() for line in lines if line.strip() and not line.startswith("#")]
+        urls = frozenset(_normalise_feed_url(u) for u in raw_urls if u)
+        hosts = frozenset(h for h in (_host_of(u) for u in urls) if h)
+        _PHISH_CACHE[target] = (mtime, urls, hosts)
+        return urls, hosts
+    except (OSError, ValueError):
+        return frozenset(), frozenset()
+
+
+def phish_feed_match(url: str) -> float:
+    """1.0 for an exact listed URL, 0.6 for a listed host off shared hosting, else 0.0."""
+    urls, hosts = load_phish_feed()
+    if not urls:
+        return 0.0
+    if _normalise_feed_url(url) in urls:
+        return 1.0
+    host = _host_of(url)
+    if host in hosts and _registrable_of(host) not in SHARED_HOSTING_DOMAINS and host not in SHORTENER_DOMAINS:
+        return 0.6
+    return 0.0
+
+
 def _anchor_mismatches(html: str) -> list[tuple[str, str]]:
     """Anchors whose visible text names a different domain than the href.
 
@@ -464,16 +548,61 @@ def has_ooxml_macro(raw: bytes) -> bool:
         return False
 
 
+def _is_ooxml(raw: bytes) -> bool:
+    """True when a zip is an Office Open XML container ([Content_Types].xml inside)."""
+    if not raw.startswith(b"\x50\x4b\x03\x04"):
+        return False
+    try:
+        with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+            return "[Content_Types].xml" in archive.namelist()
+    except (zipfile.BadZipFile, OSError, ValueError):
+        return False
+
+
+def has_ole_vba(raw: bytes) -> bool:
+    """True when a legacy OLE2 Office file actually carries a VBA project.
+
+    OLE2 is simply how every pre-2007 .doc and .xls is stored, so the
+    container alone proves nothing; most of them have no macros at all.
+    oletools reads the VBA streams when installed. Without it, the
+    directory entry `_VBA_PROJECT` (stored as UTF-16LE, present in both
+    Word's Macros/VBA and Excel's _VBA_PROJECT_CUR/VBA storages) is
+    searched for directly.
+    """
+    if not raw.startswith(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"):
+        return False
+    if HAS_OLETOOLS:
+        try:
+            parser = VBA_Parser("attachment", data=raw)
+            try:
+                return bool(parser.detect_vba_macros())
+            finally:
+                parser.close()
+        except Exception:
+            pass
+    return "_VBA_PROJECT".encode("utf-16-le") in raw
+
+
 def _extensions(filename: str) -> list[str]:
     return [part.lower() for part in (filename or "").split(".")[1:] if part]
 
 
 def attachment_risk(attachment: Attachment) -> tuple[float, dict[str, Any]]:
     """Risk of one attachment, with the findings that produced it."""
+    # The parser calls an Office zip "ooxml" and has no .lnk signature; this
+    # module's sniffer calls every zip "zip" and does know .lnk. Combine the
+    # two so a plain .docx is neither a MIME mismatch nor an "archive", and
+    # a shortcut file is still recognised as executable.
+    raw = attachment.raw or b""
+    sniffed = sniff_magic(raw)
+    if attachment.magic_type == "ooxml" or (sniffed == "zip" and _is_ooxml(raw)):
+        magic = "ooxml"
+    else:
+        magic = sniffed or attachment.magic_type or ""
     findings: dict[str, Any] = {
         "filename": attachment.filename,
         "declared_type": attachment.content_type,
-        "magic": attachment.magic_type or sniff_magic(attachment.raw),
+        "magic": magic,
         "macro": False,
         "macro_mechanism": "",
         "mime_mismatch": False,
@@ -485,15 +614,14 @@ def attachment_risk(attachment: Attachment) -> tuple[float, dict[str, Any]]:
     }
     extensions = _extensions(attachment.filename)
     last_extension = extensions[-1] if extensions else ""
-    magic = findings["magic"]
 
-    if magic == "ole2" and (last_extension in MACRO_CAPABLE_EXTENSIONS or not extensions):
+    if magic == "ole2" and has_ole_vba(raw):
         findings["macro"] = True
-        findings["macro_mechanism"] = "OLE2 container, legacy Office macro format"
-    elif has_ooxml_macro(attachment.raw):
+        findings["macro_mechanism"] = "VBA project inside a legacy OLE2 Office file"
+    elif has_ooxml_macro(raw):
         findings["macro"] = True
         findings["macro_mechanism"] = "vbaProject.bin present inside the OOXML zip"
-    elif last_extension in MACRO_CAPABLE_EXTENSIONS and last_extension.endswith("m"):
+    elif not raw and last_extension in MACRO_CAPABLE_EXTENSIONS and last_extension.endswith("m"):
         # Declared macro-enabled but the bytes were not available to
         # confirm it. Recorded as a weaker finding, and said so.
         findings["macro"] = True
@@ -689,9 +817,15 @@ def _extract_details(email: ParsedEmail) -> dict[str, Any]:
     longest = 0
     shortened = 0.0
     unrelated = 0.0
+    phish = 0.0
+    phish_hits: list[str] = []
 
     for entry in urls:
         target = entry.final_url or entry.url
+        listed = max(phish_feed_match(target), phish_feed_match(entry.url))
+        if listed > 0:
+            phish = max(phish, listed)
+            phish_hits.append(target)
         risk, findings = url_structure_risk(target, from_domain)
         findings["source"] = entry.source
         findings["declared_domain"] = entry.domain
@@ -770,6 +904,7 @@ def _extract_details(email: ParsedEmail) -> dict[str, Any]:
         "suspicious_tld": bad_tld,
         "url_length_norm": min(longest / 200.0, 1.0),
         "redirect_chain_length_norm": min(longest_chain / 5.0, 1.0),
+        "known_phish_url": phish,
         "attachment_count_norm": min(len(email.attachments or []) / 3.0, 1.0),
         "macro_office_document": macro,
         "mime_magic_mismatch": mime_mismatch,
@@ -782,6 +917,7 @@ def _extract_details(email: ParsedEmail) -> dict[str, Any]:
         "_url_findings": url_findings,
         "_attachment_findings": attachment_findings,
         "_anchor_mismatches": mismatches,
+        "_phish_hits": phish_hits,
         "_worst_url": worst_url,
         "_worst_url_risk": worst_url_risk,
         "_worst_attachment_risk": worst_attachment_risk,
@@ -837,7 +973,11 @@ def _heuristic_score(features: dict[str, float]) -> float:
 
 
 def _url_part_from_features(features: dict[str, float]) -> float:
-    """URL half of the heuristic, rebuilt from the flattened features."""
+    """URL half of the heuristic, rebuilt from the flattened features.
+
+    The trained URL model replaces only the structural guesswork; a feed
+    hit is a fact, so _model_score() adds it on top of the model's value.
+    """
     risk = 0.0
     risk += 0.45 * features.get("punycode_url", 0.0)
     risk += 0.40 * features.get("ip_literal_host", 0.0)
@@ -852,6 +992,8 @@ def _url_part_from_features(features: dict[str, float]) -> float:
     risk += 0.10 * features.get("link_domain_differs_from_sender", 0.0)
     risk += 0.08 * features.get("url_length_norm", 0.0)
     risk += 0.10 * features.get("redirect_chain_length_norm", 0.0)
+    # A link the threat feed already lists is not a structural guess.
+    risk += 0.90 * features.get("known_phish_url", 0.0)
     return min(risk, 1.0)
 
 
@@ -928,6 +1070,7 @@ def _model_score(features: dict[str, float], urls: Optional[list[str]] = None) -
     url_value = _url_model_score(urls or [])
     if url_value is None:
         return None
+    url_value = max(url_value, 0.90 * features.get("known_phish_url", 0.0))
     attachment_part = _attachment_part_from_features(features)
     logo_part = min(features.get("logo_forgery_score", 0.0), 1.0)
     parts = sorted([url_value, attachment_part, logo_part], reverse=True)
@@ -951,6 +1094,9 @@ def _evidence_row(details: dict[str, Any]) -> str:
                 f"{findings['filename']}: declared {findings['declared_type']} but bytes are "
                 f"{findings['magic'] or 'unknown'}"
             )
+    if details["_phish_hits"]:
+        kind = "URL" if details["known_phish_url"] >= 1.0 else "host"
+        parts.append(f"link {_host_of(details['_phish_hits'][0])} listed in PhishTank feed ({kind} match)")
     if details["_anchor_mismatches"]:
         shown, target = details["_anchor_mismatches"][0]
         parts.append(f"link text says {shown} but points to {target}")
@@ -1014,6 +1160,8 @@ def run(email: ParsedEmail) -> SignalResult:
             anchor_mismatches=details["_anchor_mismatches"],
             redirect_chains=details["_redirect_chains"],
             redirects_resolved=RESOLVE_REDIRECTS,
+            phish_feed_hits=details["_phish_hits"],
+            phish_feed_configured=bool(PHISHTANK_PATH),
             logo_features=details["_logo_features"],
             logo_model_backed=details["_logo_model_backed"],
             url_domains=sorted(

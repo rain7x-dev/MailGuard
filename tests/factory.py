@@ -15,8 +15,9 @@ authentication result that PASSES. It is caught anyway.
 RECEIVED CHAIN ORDER, since the report draws a line through it: index 0 is
 the topmost Received header, which is the most recent hop, our own MX.
 Index increases going backwards in time towards the origin.
-trust_boundary_index is the last index we control; anything with a higher
-index was written by a host we do not trust, and can be a lie.
+trust_boundary_index is the FIRST index we do not control, exactly as
+forensics.trust_boundary.find_trust_boundary() returns it: hops below it
+were written by our servers, it and everything after it can be a lie.
 """
 from __future__ import annotations
 
@@ -70,7 +71,7 @@ def macro_spreadsheet_bytes() -> bytes:
 def make_email(**overrides: Any) -> ParsedEmail:
     """A realistic cousin domain phishing mail.
 
-    Four Received hops, trust boundary at index 2, tier 2 attribution, two
+    Four Received hops, trust boundary at index 3, tier 2 attribution, two
     URLs and one macro bearing attachment. Any field can be overridden by
     keyword, which is how the tests build variants.
     """
@@ -125,9 +126,10 @@ def make_email(**overrides: Any) -> ParsedEmail:
         ),
     ]
 
-    # Index 0 is the most recent hop (our MX). Hops 0 to 2 are inside
-    # infrastructure we control and are therefore trusted; hop 3 was
-    # written by a host we do not control and can say anything it likes.
+    # Index 0 is the most recent hop (our MX). Hops 0 to 2 were written
+    # by infrastructure we control and are therefore trusted; hop 3, the
+    # trust boundary, was written by a host we do not control and can say
+    # anything it likes.
     received_chain = [
         ReceivedHop(
             index=0,
@@ -237,10 +239,10 @@ def make_email(**overrides: Any) -> ParsedEmail:
             "smtp.mailfrom=bounce-44718@bulkrelay.example; "
             "dkim=pass header.d=hdfc-verify.example; dmarc=pass"
         ),
-        "trust_boundary_index": 2,
+        "trust_boundary_index": 3,
         "attribution": Attribution(
             tier=2,
-            tier_name="Infrastructure attributed",
+            tier_name="provider_bounded",
             boundary_ip="203.0.113.19",
             asn="AS200000",
             country="NL",
@@ -305,14 +307,14 @@ def make_signals() -> list[SignalResult]:
         ),
         SignalResult(
             signal_id="x3",
-            name="Header and Route",
-            score=0.44,
+            name="Infrastructure",
+            score=0.72,
             status="ok",
             evidence_row=(
-                "Return-Path domain bulkrelay.example does not match From domain, "
-                "last untrusted hop claims an RFC1918 address"
+                "hdfc-verify.example, registered 4 days before receipt, no MX records, "
+                "hosting ASN (Bulk Relay Hosting BV)"
             ),
-            details={"return_path_mismatch": True, "private_ip_claim": "10.8.0.14"},
+            details={"domain_age_days": 4, "has_mx": False, "hosting_asn": True},
         ),
         SignalResult(
             signal_id="x4",
@@ -347,18 +349,17 @@ def make_signals() -> list[SignalResult]:
         ),
         SignalResult(
             signal_id="x6",
-            name="Origin and Infrastructure",
-            score=0.58,
+            name="Origin and Geo",
+            score=0.15,
             status="ok",
             evidence_row=(
-                "boundary 203.0.113.19 on AS200000 (Bulk Relay Hosting BV, NL), "
-                "shared outbound relay, domain registered 4 days ago"
+                "tier 2 provider_bounded: 203.0.113.19 (AS200000, Bulk Relay Hosting BV, NL)"
             ),
             details={
+                "tier": 2,
                 "asn": "AS200000",
                 "country": "NL",
                 "isp": "Bulk Relay Hosting BV",
-                "domain_age_days": 4,
             },
         ),
         SignalResult(

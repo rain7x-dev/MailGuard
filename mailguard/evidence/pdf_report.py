@@ -39,6 +39,7 @@ if __package__ in (None, ""):  # pragma: no cover - script convenience only
     _sys.path.insert(0, str(_pathlib.Path(__file__).resolve().parents[2]))
 
 from mailguard.core.models import ParsedEmail, SignalResult, Verdict
+from mailguard.core.privacy import maybe_mask
 from mailguard.evidence.ledger import GENESIS_HASH, EvidenceLedger, case_id_for
 
 try:
@@ -96,7 +97,7 @@ def _evidence_rows(verdict: Verdict) -> list[dict[str, Any]]:
                 "status": (signal.status or "").lower() or "unknown",
                 "points": points,
                 "points_text": f"{points:+.2f}",
-                "evidence": signal.evidence_row or "",
+                "evidence": maybe_mask(signal.evidence_row or ""),
                 "abstained": abstained,
                 "model_backed": bool(signal.model_backed),
             }
@@ -142,14 +143,20 @@ def _attribution_rows(email: ParsedEmail, verdict: Verdict) -> tuple[list[tuple[
     # Never print a confident location above tier 1. At tier 2 the
     # location belongs to the infrastructure, not the sender; at tier 3 it
     # belongs to whatever the concealment layer chose to expose.
+    place = ", ".join(x for x in (attribution.city, attribution.region) if x)
     if attribution.tier <= 1:
         rows.append(("Country", attribution.country or "not established"))
+        if place:
+            rows.append(("City / region", place))
+        if attribution.latitude is not None and attribution.longitude is not None:
+            rows.append(("Coordinates", f"{attribution.latitude:.4f}, {attribution.longitude:.4f} (GeoLite2, city level)"))
     else:
         rows.append(
             (
                 "Country",
-                f"{attribution.country or 'not established'} "
-                "(location of the boundary host, NOT of the sender)",
+                f"{attribution.country or 'not established'}"
+                + (f" ({place})" if place else "")
+                + " (location of the boundary host, NOT of the sender)",
             )
         )
 
@@ -177,7 +184,14 @@ def _attribution_rows(email: ParsedEmail, verdict: Verdict) -> tuple[list[tuple[
 
 
 def _relay_rows(email: ParsedEmail) -> tuple[list[dict[str, Any]], Optional[int]]:
-    """Received chain as printable rows, with the boundary index."""
+    """Received chain as printable rows, with the boundary index.
+
+    The boundary index has the meaning forensics.trust_boundary gives it:
+    the FIRST hop we cannot trust. Hops 0 to boundary - 1 were written by
+    our servers, the rule is drawn directly above hop `boundary`, and
+    None means no hop was attacker writable (internal mail) or there
+    was no chain at all.
+    """
     boundary = email.trust_boundary_index
     rows: list[dict[str, Any]] = []
     for hop in email.received_chain or []:
@@ -211,14 +225,32 @@ def _campaign_block(
         summary = dict(email.meta.get("campaign_summary") or {})
     if not campaign_id and not summary:
         return None
-    shared = summary.get("shared_artefacts") or summary.get("artefacts") or {}
+    # "Shared" is only printed for artefacts that more than one message in
+    # the campaign actually carried; a lone message's artefacts are listed
+    # as recorded, so the report never implies a link it has not found.
     return {
         "campaign_id": campaign_id or summary.get("campaign_id") or "unknown",
         "message_count": summary.get("message_count"),
         "first_seen": summary.get("first_seen"),
         "last_seen": summary.get("last_seen"),
-        "shared": shared,
+        "shared": summary.get("shared_artefacts") or {},
+        "recorded": {} if summary.get("shared_artefacts") else (summary.get("artefacts") or {}),
     }
+
+
+def _campaign_rows(campaign: dict[str, Any]) -> list[tuple[str, str]]:
+    rows: list[tuple[str, str]] = [("Campaign id", str(campaign["campaign_id"]))]
+    if campaign["message_count"] is not None:
+        rows.append(("Messages in campaign", str(campaign["message_count"])))
+    if campaign["first_seen"]:
+        rows.append(("First seen", str(campaign["first_seen"])))
+    if campaign["last_seen"]:
+        rows.append(("Last seen", str(campaign["last_seen"])))
+    for label, group in (("Shared", campaign["shared"]), ("Recorded", campaign.get("recorded") or {})):
+        for kind, values in sorted(group.items()):
+            listed = values if isinstance(values, (list, tuple)) else [values]
+            rows.append((f"{label} {kind.replace('_', ' ')}", ", ".join(str(v) for v in listed)))
+    return rows
 
 
 def _custody_block(
@@ -230,6 +262,7 @@ def _custody_block(
         "seal_hash": None,
         "chain_head": verdict.evidence_hash or None,
         "entry_count": None,
+        "case_entry_count": None,
         "intact": None,
         "broken_at": None,
         "sealed_at": None,
@@ -237,11 +270,13 @@ def _custody_block(
     }
     if ledger is not None:
         try:
-            report = ledger.verification_report()
+            case_id = str(email.meta.get("case_id") or case_id_for(email.raw_sha256))
+            report = ledger.verification_report(case_id)
             block.update(
                 seal_hash=report.get("seal_hash"),
                 chain_head=report.get("head") or block["chain_head"],
                 entry_count=report.get("entry_count"),
+                case_entry_count=report.get("case_entry_count"),
                 intact=report.get("intact"),
                 broken_at=report.get("broken_at"),
                 sealed_at=report.get("sealed_at"),
@@ -272,11 +307,11 @@ def _report_model(
         "probability": verdict.probability,
         "verdict_class": verdict.verdict_class,
         "summary_rows": [
-            ("From (display name)", email.from_display or "(none)"),
-            ("From (address)", email.from_address or "(none)"),
-            ("Reply-To", email.reply_to or "(not set)"),
-            ("To", ", ".join(email.to_addresses or []) or "(none)"),
-            ("Subject", email.subject or "(none)"),
+            ("From (display name)", maybe_mask(email.from_display or "(none)")),
+            ("From (address)", maybe_mask(email.from_address or "(none)")),
+            ("Reply-To", maybe_mask(email.reply_to or "(not set)")),
+            ("To", maybe_mask(", ".join(email.to_addresses or []) or "(none)")),
+            ("Subject", maybe_mask(email.subject or "(none)")),
             ("Date", email.date.isoformat() if email.date else "(no Date header)"),
             ("Message-ID", email.message_id or "(none)"),
         ],
@@ -286,9 +321,50 @@ def _report_model(
         "attribution_caveats": caveats,
         "relay_rows": relay_rows,
         "boundary_index": boundary,
+        "boundary_note": _boundary_note(boundary, len(relay_rows)),
         "campaign": _campaign_block(email, verdict, graph),
         "custody": _custody_block(email, verdict, ledger),
+        "method_note": _method_note(email),
     }
+
+
+def _boundary_note(boundary: Optional[int], hop_count: int) -> str:
+    """One sentence saying which hops can be relied on."""
+    if hop_count == 0:
+        return "No Received headers were present, so the route cannot be examined."
+    if boundary is None:
+        return ("Every hop was recorded by infrastructure under our control: the message "
+                "originated inside our own network.")
+    if boundary <= 0:
+        return ("Not even the top hop was recorded by infrastructure under our control, so "
+                "every hop below may be fabricated.")
+    if boundary >= hop_count:
+        return (f"Hops 0 to {hop_count - 1} were recorded by infrastructure under our control, "
+                "and the last of them received the message directly from the outside sender.")
+    trusted = "Hop 0 was" if boundary == 1 else f"Hops 0 to {boundary - 1} were"
+    return (f"{trusted} recorded by infrastructure under our control and can be relied on. "
+            f"Hop {boundary} and everything below the rule were written by hosts we do not "
+            "control and may be fabricated.")
+
+
+def _method_note(email: ParsedEmail) -> str:
+    """Which fusion model produced the verdict, so nobody mistakes a heuristic for a trained model."""
+    fusion = email.meta.get("fusion") or {}
+    if not fusion:
+        return ""
+    scorer = ("trained Explainable Boosting Machine" if fusion.get("scorer") == "ebm"
+              else "documented heuristic priors standing in for the untrained EBM")
+    variant = "first-contact (cold start) model" if fusion.get("variant") == "cold_start" else "standard model"
+    contact = "first contact, no sender baseline" if fusion.get("first_contact") else "sender baseline available"
+    return f"Fusion: {scorer}, {variant}; {contact}."
+
+
+def _entry_count_text(custody: dict[str, Any]) -> str:
+    total = custody.get("entry_count")
+    own = custody.get("case_entry_count")
+    if own is None:
+        return str(total)
+    return f"{own} for this case, {total} in the whole ledger"
 
 
 # ----------------------------------------------------------------------
@@ -477,6 +553,9 @@ def _build_pdf(model: dict[str, Any], out_path: str) -> str:
     # Model arithmetic, so the numbers visibly add up.
     story.append(Paragraph("3. Model arithmetic", styles["section"]))
     story.append(_kv_table(model["arithmetic_rows"], styles, usable))
+    if model["method_note"]:
+        story.append(Spacer(1, 3))
+        story.append(Paragraph(html.escape(model["method_note"]), styles["small"]))
 
     # 5. Origin attribution -------------------------------------------
     story.append(Paragraph("4. Origin attribution", styles["section"]))
@@ -488,27 +567,22 @@ def _build_pdf(model: dict[str, Any], out_path: str) -> str:
     # 6. Relay trace ---------------------------------------------------
     story.append(Paragraph("5. Relay trace", styles["section"]))
     boundary = model["boundary_index"]
-    if boundary is None:
-        story.append(
-            Paragraph(
-                "No trust boundary was established for this chain, so every hop "
-                "below must be treated as attacker writable.",
-                styles["small"],
-            )
-        )
-    else:
-        story.append(
-            Paragraph(
-                f"Hops 0 to {boundary} were recorded by infrastructure under our "
-                "control and can be relied on. Everything below the rule was "
-                "written by hosts we do not control and may be fabricated.",
-                styles["small"],
-            )
-        )
+    story.append(Paragraph(html.escape(model["boundary_note"]), styles["small"]))
     story.append(Spacer(1, 4))
-    if not model["relay_rows"]:
-        story.append(Paragraph("No Received headers were present.", styles["body"]))
     for row in model["relay_rows"]:
+        if boundary is not None and row["index"] == boundary:
+            # The rule sits directly ABOVE the first hop we cannot trust.
+            story.append(
+                Paragraph(
+                    "<b>TRUST BOUNDARY</b> - everything below this line is "
+                    "attacker writable",
+                    styles["caveat"],
+                )
+            )
+            story.append(
+                HRFlowable(width="100%", thickness=1.4, color=colors.HexColor("#B00020"))
+            )
+            story.append(Spacer(1, 4))
         colour = "#1B7A3D" if row["trusted"] else "#B00020"
         story.append(
             KeepTogether(
@@ -527,35 +601,12 @@ def _build_pdf(model: dict[str, Any], out_path: str) -> str:
                 ]
             )
         )
-        if boundary is not None and row["index"] == boundary:
-            story.append(Spacer(1, 2))
-            story.append(
-                HRFlowable(width="100%", thickness=1.4, color=colors.HexColor("#B00020"))
-            )
-            story.append(
-                Paragraph(
-                    "<b>TRUST BOUNDARY</b> - everything below this line is "
-                    "attacker writable",
-                    styles["caveat"],
-                )
-            )
-            story.append(Spacer(1, 4))
 
     # 7. Campaign linkage ---------------------------------------------
     campaign = model["campaign"]
     if campaign:
         story.append(Paragraph("6. Campaign linkage", styles["section"]))
-        rows: list[tuple[str, str]] = [("Campaign id", str(campaign["campaign_id"]))]
-        if campaign["message_count"] is not None:
-            rows.append(("Messages in campaign", str(campaign["message_count"])))
-        if campaign["first_seen"]:
-            rows.append(("First seen", str(campaign["first_seen"])))
-        if campaign["last_seen"]:
-            rows.append(("Last seen", str(campaign["last_seen"])))
-        for kind, values in sorted((campaign["shared"] or {}).items()):
-            listed = values if isinstance(values, (list, tuple)) else [values]
-            rows.append((f"Shared {kind.replace('_', ' ')}", ", ".join(str(v) for v in listed)))
-        story.append(_kv_table(rows, styles, usable))
+        story.append(_kv_table(_campaign_rows(campaign), styles, usable))
 
     # 8. Chain of custody ---------------------------------------------
     story.append(Paragraph("7. Chain of custody", styles["section"]))
@@ -568,7 +619,7 @@ def _build_pdf(model: dict[str, Any], out_path: str) -> str:
     if custody["sealed_at"]:
         custody_rows.append(("Sealed at", str(custody["sealed_at"])))
     if custody["entry_count"] is not None:
-        custody_rows.append(("Ledger entries", str(custody["entry_count"])))
+        custody_rows.append(("Ledger entries", _entry_count_text(custody)))
     if custody["intact"] is not None:
         state = "intact, every link verified" if custody["intact"] else (
             f"BROKEN at entry {custody['broken_at']}"
@@ -692,6 +743,8 @@ def _build_html(model: dict[str, Any], out_path: str) -> str:
     parts.append("</table>")
     parts.append("<h2>3. Model arithmetic</h2>")
     parts.append(_html_kv(model["arithmetic_rows"]))
+    if model["method_note"]:
+        parts.append(f"<div class='note'>{html.escape(model['method_note'])}</div>")
     # 5. Attribution
     parts.append("<h2>4. Origin attribution</h2>")
     for caveat in model["attribution_caveats"]:
@@ -700,18 +753,14 @@ def _build_html(model: dict[str, Any], out_path: str) -> str:
     # 6. Relay trace
     parts.append("<h2>5. Relay trace</h2>")
     boundary = model["boundary_index"]
-    if boundary is None:
-        parts.append(
-            "<div class='note'>No trust boundary was established, so every hop below "
-            "must be treated as attacker writable.</div>"
-        )
-    else:
-        parts.append(
-            f"<div class='note'>Hops 0 to {boundary} were recorded by infrastructure "
-            "under our control. Everything below the rule was written by hosts we do "
-            "not control and may be fabricated.</div>"
-        )
+    parts.append(f"<div class='note'>{html.escape(model['boundary_note'])}</div>")
     for row in model["relay_rows"]:
+        if boundary is not None and row["index"] == boundary:
+            parts.append(
+                "<div class='caveat'>TRUST BOUNDARY - everything below this line is "
+                "attacker writable</div>"
+            )
+            parts.append("<hr class='boundary'>")
         css = "trusted" if row["trusted"] else "untrusted"
         parts.append(
             f"<div class='hop'><b>hop {row['index']}</b> "
@@ -720,27 +769,11 @@ def _build_html(model: dict[str, Any], out_path: str) -> str:
             f"by {html.escape(row['by_host'])} &middot; {html.escape(row['timestamp'])}"
             f"<div class='mono'>{html.escape(row['raw'])}</div></div>"
         )
-        if boundary is not None and row["index"] == boundary:
-            parts.append("<hr class='boundary'>")
-            parts.append(
-                "<div class='caveat'>TRUST BOUNDARY - everything below this line is "
-                "attacker writable</div>"
-            )
     # 7. Campaign
     campaign = model["campaign"]
     if campaign:
         parts.append("<h2>6. Campaign linkage</h2>")
-        rows: list[tuple[str, str]] = [("Campaign id", str(campaign["campaign_id"]))]
-        if campaign["message_count"] is not None:
-            rows.append(("Messages in campaign", str(campaign["message_count"])))
-        if campaign["first_seen"]:
-            rows.append(("First seen", str(campaign["first_seen"])))
-        if campaign["last_seen"]:
-            rows.append(("Last seen", str(campaign["last_seen"])))
-        for kind, values in sorted((campaign["shared"] or {}).items()):
-            listed = values if isinstance(values, (list, tuple)) else [values]
-            rows.append((f"Shared {kind.replace('_', ' ')}", ", ".join(str(v) for v in listed)))
-        parts.append(_html_kv(rows))
+        parts.append(_html_kv(_campaign_rows(campaign)))
     # 8. Custody
     parts.append("<h2>7. Chain of custody</h2>")
     custody = model["custody"]
@@ -752,7 +785,7 @@ def _build_html(model: dict[str, Any], out_path: str) -> str:
     if custody["sealed_at"]:
         custody_rows.append(("Sealed at", str(custody["sealed_at"])))
     if custody["entry_count"] is not None:
-        custody_rows.append(("Ledger entries", str(custody["entry_count"])))
+        custody_rows.append(("Ledger entries", _entry_count_text(custody)))
     if custody["intact"] is not None:
         custody_rows.append(
             (

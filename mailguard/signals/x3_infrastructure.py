@@ -12,6 +12,9 @@ old and that have received mail for years. This signal measures that gap:
                     up to receive mail, so it has never been a real
                     correspondent's domain.
   name servers      the NS set; a domain with none is not live
+  hosting ASN       the boundary IP's ASN (from attribution) is a hosting or
+                    cloud network that is not a known mail provider: a rented
+                    server talking straight to our MX
   IP reputation     AbuseIPDB confidence for the trust boundary IP, only when
                     ABUSEIPDB_KEY is configured
 
@@ -80,6 +83,8 @@ FEATURE_NAMES: list[str] = [
     "registrar_known",       # 1.0 when a registrar name was found
     "abuse_confidence",      # AbuseIPDB confidence for the boundary IP, 0..1
     "abuse_known",           # 1.0 when AbuseIPDB answered
+    "hosting_asn",           # 1.0 when the boundary ASN is hosting, not a mail provider
+    "asn_known",             # 1.0 when attribution resolved the boundary ASN
 ]
 
 # Reserved names (RFC 2606 / 6761) can never be registered or resolved, so
@@ -250,6 +255,15 @@ def _lookup(email: ParsedEmail) -> dict[str, Any]:
     facts["abuse_confidence"] = abuse_confidence(ip) if config.network_lookups else None
     if not config.abuseipdb_key:
         facts["skipped"].append("AbuseIPDB key not set")
+    # Hosting ASN, read from what attribution already looked up offline.
+    # A webmail or ESP egress is hosting too, but it is how ordinary mail
+    # arrives, so only a datacentre that is NOT a known provider counts.
+    lookup: dict[str, Any] = email.meta.get("attribution_lookup") or {}
+    attribution = email.attribution
+    facts["asn"] = (attribution.asn if attribution else None) or lookup.get("asn")
+    facts["isp"] = (attribution.isp if attribution else None) or lookup.get("isp")
+    via_provider = bool(attribution and attribution.tier == 2 and "hosting network" not in (attribution.notes or ""))
+    facts["hosting_asn"] = bool(lookup.get("is_datacentre")) and not via_provider
     return facts
 
 
@@ -273,6 +287,8 @@ def _extract_features(email: ParsedEmail) -> dict[str, float]:
         "registrar_known": 1.0 if registration.get("registrar") else 0.0,
         "abuse_confidence": float(abuse) if abuse is not None else 0.0,
         "abuse_known": 1.0 if abuse is not None else 0.0,
+        "hosting_asn": 1.0 if facts.get("hosting_asn") else 0.0,
+        "asn_known": 1.0 if facts.get("asn") or facts.get("isp") else 0.0,
     }
 
 
@@ -289,6 +305,7 @@ def _heuristic_score(features: dict[str, float]) -> float:
       30 to 90 days old                      0.30
       no MX records (MX lookup completed)    0.35  never a genuine correspondent
       no name servers (NS lookup completed)  0.20  not a live domain
+      hosting ASN, not a mail provider       0.30  a rented server sending directly
       AbuseIPDB confidence c                 0.60 * c for the boundary IP
 
     What the trained model has to beat: this treats age as a step function,
@@ -309,6 +326,8 @@ def _heuristic_score(features: dict[str, float]) -> float:
         risks.append(0.35)
     if features["mx_known"] > 0 and features["ns_count"] == 0:
         risks.append(0.20)
+    if features["hosting_asn"] > 0:
+        risks.append(0.30)
     if features["abuse_known"] > 0:
         risks.append(0.60 * features["abuse_confidence"])
     remaining = 1.0
@@ -334,7 +353,8 @@ def run(email: ParsedEmail) -> SignalResult:
     try:
         features = _extract_features(email)
         facts = email.meta.get("x3_facts") or {}
-        if not (features["domain_age_known"] or features["mx_known"] or features["abuse_known"]):
+        if not (features["domain_age_known"] or features["mx_known"] or features["abuse_known"]
+                or features["asn_known"]):
             reason = "infrastructure not assessable: " + ("; ".join(facts.get("skipped") or []) or "every lookup failed")
             return SignalResult(SIGNAL_ID, SIGNAL_NAME, 0.0, "abstain", reason[:200],
                                 details={"features": features, "abstain_reason": reason})
@@ -351,6 +371,8 @@ def run(email: ParsedEmail) -> SignalResult:
             pieces.append(f"via {registration['registrar']}")
         if features["mx_known"]:
             pieces.append("MX present" if features["has_mx"] else "no MX records")
+        if features["hosting_asn"]:
+            pieces.append(f"hosting ASN ({facts.get('isp') or facts.get('asn')})")
         if features["abuse_known"]:
             pieces.append(f"AbuseIPDB {int(features['abuse_confidence'] * 100)}% for {facts.get('boundary_ip')}")
         row = ", ".join(p for p in pieces if p)

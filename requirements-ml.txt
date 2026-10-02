@@ -59,6 +59,9 @@ sentence-transformers>=2.7  # optional, sharpest embedding drift backend
 # Pillow decodes inline images for the logo CNN and for the logo geometry
 # heuristic. Without it, image shape is inferred from file size instead.
 Pillow>=10.2          # optional, inline image decoding
+# oletools reads the VBA streams of legacy OLE2 Office files. Without it,
+# x7 searches for the _VBA_PROJECT directory entry directly.
+oletools>=0.60        # optional, sharper legacy macro detection
 # requests is used ONLY by resolve_redirect_chain(), which is off by default.
 # See the comment on RESOLVE_REDIRECTS: fetching an attacker supplied URL is
 # an outbound action taken on the attacker's instruction.

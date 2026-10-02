@@ -37,7 +37,7 @@ from __future__ import annotations
 import json
 import math
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 if __package__ in (None, ""):  # pragma: no cover - script convenience only
@@ -429,9 +429,16 @@ def _extract_details(email: ParsedEmail) -> dict[str, Any]:
     if last_seen and email.date:
         try:
             parsed_last = datetime.fromisoformat(str(last_seen))
-            if parsed_last.tzinfo is not None and email.date.tzinfo is None:
-                parsed_last = parsed_last.replace(tzinfo=None)
-            delta_days = (email.date - parsed_last).days
+            current = email.date
+            # The parser always gives an aware Date, while the history store
+            # documents naive timestamps. Read naive as UTC on either side;
+            # subtracting aware from naive raises, and that was silently
+            # zeroing this feature for every sender.
+            if parsed_last.tzinfo is None:
+                parsed_last = parsed_last.replace(tzinfo=timezone.utc)
+            if current.tzinfo is None:
+                current = current.replace(tzinfo=timezone.utc)
+            delta_days = (current - parsed_last).days
             # Normalised against a quarter: a dormant account coming back
             # after ninety days is the interesting end of the scale.
             days_since = max(0.0, min(1.0, delta_days / 90.0))

@@ -50,6 +50,13 @@ class Attribution:
     isp: Optional[str] = None
     is_vpn_or_tor: bool = False
     notes: str = ""
+    # Finer location, filled only from a GeoLite2 City database. Optional and
+    # last, so every existing constructor call keeps working. Latitude and
+    # longitude exist for the trace map, which pins tier 1 origins only.
+    region: Optional[str] = None
+    city: Optional[str] = None
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
 
 
 @dataclass

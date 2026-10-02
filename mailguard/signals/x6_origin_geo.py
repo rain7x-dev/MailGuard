@@ -15,13 +15,14 @@ claimed below the boundary. Three findings:
                      hemisphere is worth flagging: either the sender is not
                      where they present themselves, or the mail was relayed
                      through infrastructure far from them.
-  datacentre origin  the boundary ASN is hosting rather than a residential or
-                     business ISP, and not a known mail provider: a rented
-                     server talking straight to our MX.
   forged origin      a hop below the trust boundary claims to have been written
                      by one of our own servers. Genuine mail cannot produce
                      that; a sender fabricating a travel history can. It is a
                      lie about where the message came from, so it scores here.
+
+A hosting ASN is deliberately NOT scored here: it is a property of the
+sending infrastructure and x3 scores it. Counting it in both signals would
+make fusion add the same finding twice. It is still recorded in details.
 
 There is NO trained model here; this signal is rule based by design. The
 rules are few, each one is a statement an analyst can check by reading the
@@ -42,7 +43,6 @@ SIGNAL_NAME = "Origin and Geo"
 TIER_RISK: dict[int, float] = {1: 0.0, 2: 0.15, 3: 0.65}
 UNWALKABLE_RISK: float = 0.40       # tier 3 because the chain could not be walked, not proven concealment
 TIMEZONE_CONFLICT_RISK: float = 0.30
-DATACENTRE_RISK: float = 0.30
 FORGED_ORIGIN_RISK: float = 0.60
 
 # Plausible UTC offsets (minutes) for a sender in each country, standard and
@@ -115,10 +115,8 @@ def run(email: ParsedEmail) -> SignalResult:
                 risks.append((TIMEZONE_CONFLICT_RISK, f"Date header {_format_offset(offset)} conflicts with origin country {country}"))
 
         isp = attribution.isp or ""
+        # Recorded for the analyst, scored by x3.
         datacentre = bool(lookup.get("is_datacentre")) or any(k in isp.lower() for k in config.datacentre_asn_keywords if k)
-        provider_bounded = attribution.tier == 2 and "hosting network" not in (attribution.notes or "")
-        if datacentre and not provider_bounded and attribution.tier != 3:
-            risks.append((DATACENTRE_RISK, f"datacentre ASN ({isp or attribution.asn})"))
 
         forged = (email.meta.get("trust_boundary") or {}).get("forged_internal_hops") or []
         if forged:
@@ -145,8 +143,11 @@ def run(email: ParsedEmail) -> SignalResult:
                 "boundary_ip": attribution.boundary_ip,
                 "asn": attribution.asn,
                 "country": attribution.country,
+                "region": attribution.region,
+                "city": attribution.city,
                 "isp": attribution.isp,
                 "is_vpn_or_tor": attribution.is_vpn_or_tor,
+                "is_tor_exit": bool(lookup.get("is_tor_exit")),
                 "declared_utc_offset": _format_offset(offset) if offset is not None else None,
                 "timezone_conflict": conflict,
                 "timezone_checked": offset is not None and country in COUNTRY_OFFSETS,

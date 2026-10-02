@@ -75,9 +75,27 @@ VPN_TOR_KEYWORDS: list[str] = [
 GEOLITE_DB_PATH: str = ""
 GEOLITE_ASN_DB_PATH: str = ""
 
+# Optional. A local copy of the Tor Project's exit list, one IP per line
+# (https://check.torproject.org/torbulkexitlist). Tor exits rarely carry
+# "tor" in their ASN name, so keyword matching alone misses most of them.
+# Read from disk only: attribution never fetches it.
+TOR_EXIT_LIST_PATH: str = ""
+
 # Optional. AbuseIPDB API key for ASN / IP reputation in x3. Empty skips
 # that sub check.
 ABUSEIPDB_KEY: str = ""
+
+# Privacy. With MASK_PII on, addresses and personal identifiers (card,
+# account, Aadhaar, PAN, phone numbers) are masked in everything printed or
+# written for people: terminal output, JSON and the report. Scoring always
+# sees the unmasked message; the evidence ledger stores hashes and verdicts,
+# never message content.
+MASK_PII: bool = False
+
+# Retention, in days, for case data MailGuard keeps between runs (the
+# campaign graph store). 0 keeps everything. The ledger is append only and
+# holds no message content, so it is not pruned.
+RETENTION_DAYS: int = 0
 
 # Per signal time budget. A signal that overruns is recorded as abstain.
 SIGNAL_TIMEOUT_MS: int = 400
@@ -100,7 +118,10 @@ class Config:
     vpn_tor_keywords: list[str] = field(default_factory=lambda: list(VPN_TOR_KEYWORDS))
     geolite_db_path: str = GEOLITE_DB_PATH
     geolite_asn_db_path: str = GEOLITE_ASN_DB_PATH
+    tor_exit_list_path: str = TOR_EXIT_LIST_PATH
     abuseipdb_key: str = ABUSEIPDB_KEY
+    mask_pii: bool = MASK_PII
+    retention_days: int = RETENTION_DAYS
     signal_timeout_ms: int = SIGNAL_TIMEOUT_MS
     network_lookups: bool = NETWORK_LOOKUPS
     network_timeout_s: float = NETWORK_TIMEOUT_S
@@ -152,7 +173,10 @@ def load_config(**overrides: Any) -> Config:
         MAILGUARD_VPN_TOR_KEYWORDS       comma separated, added
         MAILGUARD_GEOLITE_DB             path to a GeoLite2 City / Country .mmdb
         MAILGUARD_GEOLITE_ASN_DB         path to a GeoLite2 ASN .mmdb
+        MAILGUARD_TOR_EXIT_LIST          path to a Tor exit list, one IP per line
         MAILGUARD_ABUSEIPDB_KEY          AbuseIPDB API key
+        MAILGUARD_MASK_PII               1 to mask personal data in output
+        MAILGUARD_RETENTION_DAYS         prune stored case data older than this
         MAILGUARD_SIGNAL_TIMEOUT_MS      integer milliseconds
         MAILGUARD_NETWORK                0 to disable live lookups
         MAILGUARD_NETWORK_TIMEOUT        seconds, float
@@ -173,7 +197,14 @@ def load_config(**overrides: Any) -> Config:
     config.vpn_tor_keywords += [k.lower() for k in _env_list("MAILGUARD_VPN_TOR_KEYWORDS") or []]
     config.geolite_db_path = os.environ.get("MAILGUARD_GEOLITE_DB", config.geolite_db_path)
     config.geolite_asn_db_path = os.environ.get("MAILGUARD_GEOLITE_ASN_DB", config.geolite_asn_db_path)
+    config.tor_exit_list_path = os.environ.get("MAILGUARD_TOR_EXIT_LIST", config.tor_exit_list_path)
     config.abuseipdb_key = os.environ.get("MAILGUARD_ABUSEIPDB_KEY", config.abuseipdb_key)
+    mask = _env_bool("MAILGUARD_MASK_PII")
+    if mask is not None:
+        config.mask_pii = mask
+    retention = _env_int("MAILGUARD_RETENTION_DAYS")
+    if retention is not None and retention >= 0:
+        config.retention_days = retention
     timeout = _env_int("MAILGUARD_SIGNAL_TIMEOUT_MS")
     if timeout is not None and timeout > 0:
         config.signal_timeout_ms = timeout

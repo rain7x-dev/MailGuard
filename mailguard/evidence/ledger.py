@@ -214,16 +214,23 @@ class EvidenceLedger:
             previous_hash = str(entry.get("entry_hash"))
         return True, None
 
-    def verification_report(self) -> dict[str, Any]:
-        """Verification result plus the numbers a report needs to print."""
+    def verification_report(self, case_id: Optional[str] = None) -> dict[str, Any]:
+        """Verification result plus the numbers a report needs to print.
+
+        With a case_id, the seal and the entry count are that case's own:
+        one ledger holds every message, and the first seal in the file
+        belongs to whichever message happened to arrive first.
+        """
         intact, broken_index = self.verify_chain()
         entries = self.entries()
-        seal = next((entry for entry in entries if entry.get("type") == "raw_seal"), None)
+        scoped = [entry for entry in entries if entry.get("case_id") == case_id] if case_id else entries
+        seal = next((entry for entry in scoped if entry.get("type") == "raw_seal"), None)
         return {
             "path": self.path,
             "intact": intact,
             "broken_at": broken_index,
             "entry_count": len(entries),
+            "case_entry_count": len(scoped),
             "head": self.head(),
             "sealed_at": (seal or {}).get("timestamp"),
             "seal_hash": (seal or {}).get("entry_hash"),

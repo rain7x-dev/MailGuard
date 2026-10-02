@@ -159,6 +159,8 @@ PAYMENT_REDIRECTION_PHRASES: tuple[str, ...] = (
     "kindly process the transfer", "release the payment", "expedite the payment",
     "make the payment today", "hold the payment", "our old account is frozen",
     "our account is under audit", "bank has blocked our account",
+    "updated remittance details", "new remittance details", "revised remittance details",
+    "remittance details on our portal", "arrange the transfer", "arrange the payment",
 )
 
 # Invoice manipulation: the paperwork is rewritten so the fraud looks
@@ -172,6 +174,7 @@ INVOICE_MANIPULATION_PHRASES: tuple[str, ...] = (
     "kindly settle", "settle the outstanding", "clear the outstanding",
     "invoice number has changed", "please disregard the previous invoice",
     "ignore the earlier invoice", "the earlier invoice was incorrect",
+    "remains unpaid", "is still unpaid", "payment reminder", "remains outstanding",
 )
 
 # Credential harvesting: the payload is the reader's password or OTP.

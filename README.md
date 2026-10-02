@@ -47,10 +47,17 @@ data, not a clean score, and fusion treats it that way.
                           |
                        VERDICT    BLOCK / WARN / PASS + contributions
                           |
-          +---------------+----------------+
-          |               |                |
-    CAMPAIGN GRAPH  EVIDENCE LEDGER    PDF REPORT
+          +---------------+----------------+----------------+
+          |               |                |                |
+    CAMPAIGN GRAPH  EVIDENCE LEDGER    PDF REPORT       TRACE MAP
+    (WARN/BLOCK)    (every stage)
 ```
+
+The evidence ledger is written from the first step: the raw hash is sealed
+into it before parsing, and every later stage (parse, signals, verdict,
+report) is appended to the same hash chain. The verdict's `evidence_hash`
+is the chain head after the verdict entry. Mail scored WARN or BLOCK is
+filed into the campaign graph; PASS mail is sealed but never grouped.
 
 ## The trust boundary
 
@@ -98,6 +105,13 @@ Attribution then takes that one IP and assigns a tier:
 | 2 | `provider_bounded` | webmail, ESP or hosting; only the provider can identify the account holder |
 | 3 | `anonymised` | VPN, proxy, Tor, or the chain could not be walked; the concealment is the finding |
 
+With a GeoLite2 City database, attribution also records region, city and
+coordinates. Coordinates are kept for tier 1 only, and the trace map
+(`--trace-map`) draws a pin for tier 1 only: at tier 2 a pin would show
+the provider's datacentre as if it were the sender, which is the false
+pin the design forbids. Tor exits are recognised from a local copy of the
+Tor Project exit list (`MAILGUARD_TOR_EXIT_LIST`), not only by keyword.
+
 ## Install and run
 
 Python 3.11 or newer. Nothing beyond the standard library is required.
@@ -109,20 +123,44 @@ pip install -r requirements-ml.txt          # optional extras, ML half
 python -m mailguard.cli --eml samples/cousin_domain_phish.eml
 python -m mailguard.cli --eml samples/forged_headers.eml --json
 python -m mailguard.cli --stdin < samples/legitimate.eml
-python -m mailguard.cli --eml samples/cousin_domain_phish.eml --report case.pdf
+python -m mailguard.cli --eml samples/cousin_domain_phish.eml --report case.pdf --trace-map case.html
 MAILGUARD_IMAP_PASSWORD=... python -m mailguard.cli --imap-host imap.example.org --imap-user analyst --imap-limit 5
 ```
 
 Options: `--trusted-host HOST` (repeatable, replaces the default list),
 `--offline` (no DNS, RDAP or AbuseIPDB lookups), `--timeout-ms N` (per
-signal budget, default 400), `-v` (show why a signal module was skipped).
+signal budget, default 400), `--report PATH` (forensic PDF),
+`--trace-map PATH` (HTML trace map), `--ledger PATH` (evidence ledger,
+default `mailguard_ledger.jsonl` in the working directory),
+`--no-ledger`, `--graph PATH` (persist the campaign graph across runs),
+`--mask` (mask personal data in all output), `-v` (show why a signal
+module was skipped).
 
 Configuration lives in `mailguard/core/config.py`, and every value can be
 overridden by environment variable: `MAILGUARD_TRUSTED_HOSTS`,
-`MAILGUARD_GEOLITE_DB`, `MAILGUARD_GEOLITE_ASN_DB`, `MAILGUARD_ABUSEIPDB_KEY`,
-`MAILGUARD_SIGNAL_TIMEOUT_MS`, `MAILGUARD_NETWORK=0`, and others listed in
+`MAILGUARD_GEOLITE_DB`, `MAILGUARD_GEOLITE_ASN_DB`, `MAILGUARD_TOR_EXIT_LIST`,
+`MAILGUARD_ABUSEIPDB_KEY`, `MAILGUARD_SIGNAL_TIMEOUT_MS`, `MAILGUARD_NETWORK=0`,
+`MAILGUARD_MASK_PII=1`, `MAILGUARD_RETENTION_DAYS`, and others listed in
 `load_config()`. **Set `TRUSTED_HOSTS` to your own mail servers before
 relying on any result.**
+
+## Privacy and retention
+
+Scoring always reads the unmasked message. Masking (`--mask` or
+`MAILGUARD_MASK_PII=1`) is applied where data reaches people: the terminal,
+JSON and the report. It reduces address local parts to one character and
+masks card, account, Aadhaar, PAN and phone numbers, while leaving domains,
+IPs and URLs intact, because those describe infrastructure and are the
+evidence. The ledger stores hashes and verdicts, never message content.
+`MAILGUARD_RETENTION_DAYS` prunes older cases from the persisted campaign
+graph on every run.
+
+## Tests
+
+```bash
+python tests/test_fusion.py      # fusion, verdict bands, ledger
+python tests/test_pipeline.py    # the samples end to end, plus regression tests
+```
 
 The CLI runs with whatever exists: missing signal modules are skipped and
 named, and without the fusion module it prints the signal table with a line
@@ -137,13 +175,14 @@ heuristic runs, so the pipeline works end to end today.
 | Signal / stage | File | Constant | Expected artefact |
 | --- | --- | --- | --- |
 | x2 Identity | `mailguard/signals/x2_identity.py` | `MODEL_PATH` | joblib binary classifier with `predict_proba`, features in `FEATURE_NAMES` order |
-| x3 Infrastructure | `mailguard/signals/x3_infrastructure.py` | `MODEL_PATH` | joblib gradient boosted classifier with `predict_proba(X) -> (n, 2)`, 9 features in `FEATURE_NAMES` order |
+| x3 Infrastructure | `mailguard/signals/x3_infrastructure.py` | `MODEL_PATH` | joblib gradient boosted classifier with `predict_proba(X) -> (n, 2)`, 11 features in `FEATURE_NAMES` order |
 | x4 Sender Baseline | `mailguard/signals/x4_sender_baseline.py` | `MODEL_PATH` | joblib dict with a fitted IsolationForest and its feature names |
 | x5 Intent | `mailguard/signals/x5_intent.py` | `MODEL_PATH` | directory from `save_pretrained()`: fine tuned DistilBERT sequence classifier |
 | x7 URL | `mailguard/signals/x7_attachment_url.py` | `MODEL_PATH` | joblib dict with a URL character model and its vocabulary |
 | x7 Logo | `mailguard/signals/x7_attachment_url.py` | `LOGO_MODEL_PATH` | torch state_dict for a 64x64 logo classifier plus a JSON label map |
 | Fusion | `mailguard/fusion/ebm_fusion.py` | `MODEL_PATH` | joblib `ExplainableBoostingClassifier` over 14 columns, supporting `explain_local()` |
 | Calibration | `mailguard/fusion/ebm_fusion.py` | `CALIBRATOR_PATH` | joblib isotonic or Platt calibrator |
+| Cold start (first contact) | `mailguard/fusion/ebm_fusion.py` | `COLD_START_MODEL_PATH`, `COLD_START_CALIBRATOR_PATH` | EBM and calibrator fitted on first-contact mail, columns in `COLD_START_FEATURE_NAMES` order |
 
 x1 and x6 are rule based by design and have no slot. The ML half's slots
 are described in full in `README_ML.md`.

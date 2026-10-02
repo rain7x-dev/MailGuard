@@ -22,6 +22,11 @@ Five things are measured:
    installation has never seen. Faking a reply to a conversation that
    never happened is a strong indicator, because a real thread hijack
    requires mailbox access while a forged one costs nothing.
+6. Executive impersonation: the display name is one of this
+   organisation's own executives, but the address is outside the
+   organisation's domains. `"Rajesh Kumar (CEO)" <ceo.office@gmail.com>`
+   is the opening line of most payment diversion fraud, and it carries no
+   brand and no lookalike domain for checks 1 and 2 to find.
 
 This signal carries most of the BEC detection in MailGuard, so it is
 deliberately the most thorough of the four in this half of the project.
@@ -85,6 +90,7 @@ FEATURE_NAMES: list[str] = [
     "thread_hijack",                # In-Reply-To references an unknown ID
     "reply_without_references",     # claims a reply but carries no References
     "return_path_mismatch",         # Return-Path domain != From domain
+    "executive_impersonation",      # display name is our executive, address is not ours
 ]
 
 # ----------------------------------------------------------------------
@@ -234,6 +240,19 @@ LEET_MAP: dict[str, str] = {
 #     "message_ids": ["<thread-root@example.com>"]
 #   }
 HISTORY_PATH: str = os.environ.get("MAILGUARD_HISTORY_PATH", "")
+
+# Executive impersonation. The people an attacker would pose as, and the
+# domains this organisation genuinely sends from. Both are operator
+# knowledge, set by environment, and the check is off while either is
+# empty: guessing who the executives are would only produce noise.
+#   MAILGUARD_EXECUTIVES   comma separated names, "Rajesh Kumar, Priya Nair"
+#   MAILGUARD_ORG_DOMAINS  comma separated domains, "example.org, example.in"
+EXECUTIVE_NAMES: list[str] = [
+    n.strip() for n in os.environ.get("MAILGUARD_EXECUTIVES", "").split(",") if n.strip()
+]
+ORG_DOMAINS: list[str] = [
+    d.strip().lower() for d in os.environ.get("MAILGUARD_ORG_DOMAINS", "").split(",") if d.strip()
+]
 
 _MODEL: Any = None
 _MODEL_TRIED: bool = False
@@ -546,6 +565,31 @@ def display_name_brand_mismatch(display: str, from_domain: str) -> tuple[float, 
     return 0.0, ""
 
 
+def _name_tokens(text: str) -> list[str]:
+    return re.findall(r"[a-z]+", skeleton(text or ""))
+
+
+def executive_impersonation(display: str, from_domain: str) -> tuple[float, str]:
+    """Does the display name claim one of our executives from outside our domains?
+
+    Every token of the configured name must appear in the display name,
+    so "Rajesh Kumar (CEO)" and "Kumar Rajesh" match "Rajesh Kumar", while
+    "Rajesh" alone does not. Names are folded through skeleton() first, so
+    a Cyrillic letter inside the name does not slip past.
+    """
+    if not EXECUTIVE_NAMES or not ORG_DOMAINS or not display:
+        return 0.0, ""
+    domain = (from_domain or "").lower()
+    if any(domain == d or domain.endswith("." + d) for d in ORG_DOMAINS):
+        return 0.0, ""
+    shown = set(_name_tokens(display))
+    for name in EXECUTIVE_NAMES:
+        wanted = _name_tokens(name)
+        if wanted and all(token in shown for token in wanted):
+            return 1.0, name
+    return 0.0, ""
+
+
 # ----------------------------------------------------------------------
 # Feature extraction
 # ----------------------------------------------------------------------
@@ -559,6 +603,7 @@ def _extract_details(email: ParsedEmail) -> dict[str, Any]:
     cousin, cousin_details = cousin_domain_score(from_domain)
 
     brand_mismatch, brand_token = display_name_brand_mismatch(email.from_display, from_domain)
+    executive, executive_name = executive_impersonation(email.from_display, from_domain)
     display_has_address = (
         1.0 if re.search(r"[\w.+-]+@[\w.-]+\.\w+", email.from_display or "") else 0.0
     )
@@ -614,6 +659,8 @@ def _extract_details(email: ParsedEmail) -> dict[str, Any]:
         "thread_hijack": thread_hijack,
         "reply_without_references": reply_without_refs,
         "return_path_mismatch": return_path_mismatch,
+        "executive_impersonation": executive,
+        "_executive_name": executive_name,
         "_from_domain": from_domain,
         "_matched_domain": cousin_details["matched_domain"],
         "_mechanism": cousin_details["mechanism"],
@@ -641,6 +688,7 @@ def _extract_features(email: ParsedEmail) -> dict[str, float]:
 # structural findings together can.
 _H_WEIGHTS: dict[str, float] = {
     "cousin_domain_score": 0.55,
+    "executive_impersonation": 0.50,
     "display_name_brand_mismatch": 0.20,
     "thread_hijack": 0.35,
     "reply_to_freemail": 0.15,
@@ -661,6 +709,9 @@ def _heuristic_score(features: dict[str, float]) -> float:
 
       * cousin domain proximity is the dominant term (0.55). A lookalike
         registration is a deliberate act with no innocent explanation.
+      * an executive's name on an outside address is next (0.50): with a
+        Reply-To at free mail on top it reaches the high band on its own,
+        which is right, because that pairing is the classic CEO fraud.
       * a thread hijack claim is next (0.35): forging In-Reply-To is free
         for an attacker and never happens by accident.
       * a display name claiming a brand the domain cannot use adds 0.20.
@@ -732,6 +783,8 @@ def _evidence_row(details: dict[str, Any]) -> str:
         parts.append("punycode domain")
     if details["confusable_char_count"]:
         parts.append(f"{int(details['confusable_char_count'])} confusable characters in domain")
+    if details["executive_impersonation"]:
+        parts.append(f"display name claims executive '{details['_executive_name']}' from an outside domain")
     if details["display_name_brand_mismatch"]:
         parts.append(f"display name claims '{details['_brand_token']}'")
     if details["thread_hijack"]:
@@ -777,6 +830,7 @@ def run(email: ParsedEmail) -> SignalResult:
             mechanism=details["_mechanism"],
             punycode=details["_punycode"],
             brand_token=details["_brand_token"],
+            executive_name=details["_executive_name"],
             reply_to_domain=details["_reply_to_domain"],
             history_count=details["_history_count"],
             history_store_configured=details["_history_configured"],

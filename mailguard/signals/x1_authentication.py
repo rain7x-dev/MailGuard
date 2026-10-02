@@ -17,7 +17,8 @@ neither is, the passes vouch for somebody else.
 Sources, in order:
 
   1. The Authentication-Results header. One written by our own servers
-     (authserv-id in TRUSTED_HOSTS) is preferred; if only a foreign one
+     (authserv-id in TRUSTED_HOSTS, and placed above the trust boundary so
+     the sender cannot have typed it) is preferred; if only a foreign one
      exists it is still read, but the evidence says it is unverified,
      because anyone can type an Authentication-Results header.
   2. If there is none, live verification: SPF with `pyspf` evaluated
@@ -199,13 +200,39 @@ def dkim_key_bits(domain: str, selector: str) -> Optional[int]:
         return None
 
 
+def _above_boundary(email: ParsedEmail, count: int) -> list[bool]:
+    """For each Authentication-Results header, did it sit above the trust boundary?
+
+    An authserv-id is just text: an attacker can write
+    `Authentication-Results: mx.ourdomain; spf=pass; dmarc=pass` into the
+    message before sending it. What they cannot do is place it above the
+    Received header our own server prepended. So a header is only ours if
+    every Received header before it in the raw message is a trusted hop.
+    Without the raw header order, every header is given the benefit of the
+    doubt, as before.
+    """
+    order = [str(name).lower() for name in (email.meta.get("header_order") or [])]
+    boundary = email.trust_boundary_index
+    if not order or boundary is None:
+        return [True] * count
+    flags: list[bool] = []
+    received_seen = 0
+    for name in order:
+        if name == "received":
+            received_seen += 1
+        elif name == "authentication-results":
+            flags.append(received_seen <= boundary)
+    return (flags + [False] * count)[:count]
+
+
 def _from_headers(email: ParsedEmail, trusted_hosts: list[str]) -> Optional[dict[str, Any]]:
     """Results from Authentication-Results, preferring one written by our own servers."""
     values = email.headers.get("authentication-results", []) or []
     if not values:
         return None
     parsed = [parse_auth_results(v) for v in values]
-    ours = [p for p in parsed if host_matches(p["authserv_id"], trusted_hosts)]
+    placed = _above_boundary(email, len(parsed))
+    ours = [p for p, above in zip(parsed, placed) if above and host_matches(p["authserv_id"], trusted_hosts)]
     chosen = ours or parsed
     found: dict[str, Any] = {
         "source": "Authentication-Results",
